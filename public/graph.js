@@ -23,7 +23,7 @@ const GROUP_LABEL = { entity: '实体', concept: '概念', topic: '主题', sour
 // ── State ───────────────────────────────────────────────────────────────────
 
 let allNodes = [], allEdges = []
-let simulation, linkSel, nodeSel, labelSel
+let simulation, linkSel, nodeSel, labelSel, glowSel
 let activeFilter = 'all'
 
 // ── Init ────────────────────────────────────────────────────────────────────
@@ -110,32 +110,66 @@ function drawGraph(nodes, edges) {
     .attr('width', width)
     .attr('height', height)
 
-  const g = root.append('g')
+  // Subtle depth gradient background
+  const defs = root.append('defs')
+  const bgGrad = defs.append('radialGradient').attr('id', 'graph-bg')
+  bgGrad.append('stop').attr('offset', '0%').attr('stop-color', '#161929')
+  bgGrad.append('stop').attr('offset', '100%').attr('stop-color', '#0f1117')
+  root.append('rect')
+    .attr('width', width).attr('height', height)
+    .attr('fill', 'url(#graph-bg)').attr('pointer-events', 'none')
 
+  const g = root.append('g')
   root.call(d3.zoom().scaleExtent([0.15, 5]).on('zoom', e => g.attr('transform', e.transform)))
 
   const simNodes = nodes.map(n => ({ ...n }))
   const idx = Object.fromEntries(simNodes.map(n => [n.id, n]))
 
+  // Compute per-node degree for size scaling
+  const degree = {}
+  for (const n of simNodes) degree[n.id] = 0
   const simEdges = edges
     .filter(e => idx[e.source?.id ?? e.source] && idx[e.target?.id ?? e.target])
-    .map(e => ({ source: e.source?.id ?? e.source, target: e.target?.id ?? e.target }))
+    .map(e => {
+      const s = e.source?.id ?? e.source
+      const t = e.target?.id ?? e.target
+      degree[s] = (degree[s] || 0) + 1
+      degree[t] = (degree[t] || 0) + 1
+      return { source: s, target: t }
+    })
 
-  const radius = Math.min(width, height) * 0.38
+  // Hub nodes grow up to 2× base size
+  function nodeR(d) {
+    return (NODE_R[d.type] || 6) + Math.min(Math.sqrt(degree[d.id] || 0) * 1.6, 10)
+  }
+
+  const radius = Math.min(width, height) * 0.36
   simulation = d3.forceSimulation(simNodes)
-    .force('link', d3.forceLink(simEdges).id(d => d.id).distance(80).strength(0.5))
-    .force('charge', d3.forceManyBody().strength(-320))
-    .force('center', d3.forceCenter(width / 2, height / 2).strength(0.08))
-    .force('radial', d3.forceRadial(radius, width / 2, height / 2).strength(0.07))
-    .force('collision', d3.forceCollide().radius(d => (NODE_R[d.type] || 6) + 10))
+    .force('link', d3.forceLink(simEdges).id(d => d.id).distance(90).strength(0.4))
+    .force('charge', d3.forceManyBody().strength(d => -300 - (degree[d.id] || 0) * 18))
+    .force('center', d3.forceCenter(width / 2, height / 2).strength(0.07))
+    .force('radial', d3.forceRadial(radius, width / 2, height / 2).strength(0.06))
+    .force('collision', d3.forceCollide().radius(d => nodeR(d) + 14))
 
-  linkSel = g.append('g').selectAll('line').data(simEdges).join('line')
-    .attr('stroke', '#2d3148').attr('stroke-width', 1.5)
+  // Curved links (quadratic bezier, 15% perpendicular offset)
+  linkSel = g.append('g').selectAll('path').data(simEdges).join('path')
+    .attr('fill', 'none')
+    .attr('stroke', 'rgba(90,110,175,0.28)')
+    .attr('stroke-width', 1)
 
-  nodeSel = g.append('g').selectAll('circle').data(simNodes).join('circle')
-    .attr('r', d => NODE_R[d.type] || 6)
+  // Glow halos behind nodes
+  glowSel = g.append('g').selectAll('circle').data(simNodes).join('circle')
+    .attr('r', d => nodeR(d) + 8)
     .attr('fill', d => NODE_COLOR[d.type] || NODE_COLOR.unknown)
-    .attr('stroke', '#0f1117').attr('stroke-width', 2)
+    .attr('opacity', 0.1)
+    .attr('pointer-events', 'none')
+
+  // Main nodes
+  nodeSel = g.append('g').selectAll('circle').data(simNodes).join('circle')
+    .attr('r', d => nodeR(d))
+    .attr('fill', d => NODE_COLOR[d.type] || NODE_COLOR.unknown)
+    .attr('stroke', d => (NODE_COLOR[d.type] || NODE_COLOR.unknown) + '50')
+    .attr('stroke-width', 2.5)
     .attr('cursor', 'pointer')
     .on('mouseover', onHover)
     .on('mouseout',  onHoverOut)
@@ -146,19 +180,26 @@ function drawGraph(nodes, edges) {
       .on('end',   (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null })
     )
 
+  // Labels — dark outline (paint-order: stroke) prevents overlap clutter
   labelSel = g.append('g').selectAll('text').data(simNodes).join('text')
-    .text(d => d.title.length > 16 ? d.title.slice(0, 16) + '…' : d.title)
-    .attr('font-size', 10.5)
-    .attr('fill', '#64748b')
+    .text(d => d.title.length > 14 ? d.title.slice(0, 14) + '…' : d.title)
+    .attr('font-size', 10)
+    .attr('fill', '#8a97ae')
     .attr('pointer-events', 'none')
-    .attr('dx', d => (NODE_R[d.type] || 6) + 5)
-    .attr('dy', 4)
+
+  function linkPath(d) {
+    const sx = d.source.x, sy = d.source.y
+    const tx = d.target.x, ty = d.target.y
+    const cx = (sx + tx) / 2 - (ty - sy) * 0.15
+    const cy = (sy + ty) / 2 + (tx - sx) * 0.15
+    return `M${sx},${sy} Q${cx},${cy} ${tx},${ty}`
+  }
 
   simulation.on('tick', () => {
-    linkSel.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
-            .attr('x2', d => d.target.x).attr('y2', d => d.target.y)
+    linkSel.attr('d', linkPath)
+    glowSel.attr('cx', d => d.x).attr('cy', d => d.y)
     nodeSel.attr('cx', d => d.x).attr('cy', d => d.y)
-    labelSel.attr('x', d => d.x).attr('y', d => d.y)
+    labelSel.attr('x', d => d.x + nodeR(d) + 4).attr('y', d => d.y + 3.5)
   })
 }
 
@@ -175,45 +216,69 @@ function onHover(event, d) {
     if ((e.target.id ?? e.target) === d.id) neighbors.add(e.source.id ?? e.source)
   })
 
-  nodeSel.attr('opacity', n => neighbors.has(n.id) ? 1 : 0.12)
+  nodeSel.attr('opacity', n => neighbors.has(n.id) ? 1 : 0.1)
+  glowSel.attr('opacity', n => n.id === d.id ? 0.35 : neighbors.has(n.id) ? 0.18 : 0.02)
   linkSel.attr('opacity', e =>
-    (e.source.id ?? e.source) === d.id || (e.target.id ?? e.target) === d.id ? 1 : 0.04
+    (e.source.id ?? e.source) === d.id || (e.target.id ?? e.target) === d.id ? 0.9 : 0.03
   ).attr('stroke', e =>
     (e.source.id ?? e.source) === d.id || (e.target.id ?? e.target) === d.id
-      ? NODE_COLOR[d.type] : '#2d3148'
+      ? NODE_COLOR[d.type] + 'cc' : 'rgba(90,110,175,0.28)'
+  ).attr('stroke-width', e =>
+    (e.source.id ?? e.source) === d.id || (e.target.id ?? e.target) === d.id ? 1.5 : 1
   )
-  labelSel.attr('opacity', n => neighbors.has(n.id) ? 1 : 0.08)
+  labelSel.attr('opacity', n => neighbors.has(n.id) ? 1 : 0.06)
 }
 
 function onHoverOut() {
   document.getElementById('tooltip').style.opacity = 0
-  if (nodeSel) { nodeSel.attr('opacity', 1); linkSel.attr('opacity', 1).attr('stroke', '#2d3148'); labelSel.attr('opacity', 1) }
+  if (nodeSel) {
+    nodeSel.attr('opacity', 1)
+    glowSel.attr('opacity', 0.1)
+    linkSel.attr('opacity', 1).attr('stroke', 'rgba(90,110,175,0.28)').attr('stroke-width', 1)
+    labelSel.attr('opacity', 1)
+  }
 }
 
-async function onNodeClick(event, d) {
-  const panel = document.getElementById('node-panel')
-  panel.classList.add('open')
+async function openPageInPanel(pageId) {
+  document.getElementById('node-panel').classList.add('open')
 
-  const b = BADGE[d.type] || BADGE.unknown
+  const node = allNodes.find(n => n.id === pageId)
+  const nodeType = node?.type || 'unknown'
+  const b = BADGE[nodeType] || BADGE.unknown
   const badge = document.getElementById('node-type-badge')
-  badge.textContent = d.type
+  badge.textContent = nodeType
   badge.style.background = b.bg
   badge.style.color = b.color
 
-  document.getElementById('node-title').textContent = d.title
+  document.getElementById('node-title').textContent = node?.title || pageId.split('/').pop()
   document.getElementById('node-content').innerHTML = '<span class="cursor"></span>'
 
-  const data = await fetch(`/api/page/${encodeURIComponent(d.file.replace('.md', ''))}`).then(r => r.json())
+  const data = await fetch(`/api/page/${encodeURIComponent(pageId)}`).then(r => r.json())
   document.getElementById('node-content').innerHTML = data.html
+
+  document.querySelectorAll('#node-content a[href^="wiki:"]').forEach(a => {
+    a.addEventListener('click', e => {
+      e.preventDefault()
+      openPageInPanel(a.getAttribute('href').slice(5))
+    })
+  })
+}
+
+async function onNodeClick(event, d) {
+  openPageInPanel(d.file.replace('.md', ''))
 }
 
 function highlightNodes(matchedIds) {
   if (!nodeSel) return
   if (!matchedIds) {
-    nodeSel.attr('opacity', 1); labelSel.attr('opacity', 1); linkSel.attr('opacity', 1)
+    nodeSel.attr('opacity', 1)
+    glowSel.attr('opacity', 0.1)
+    labelSel.attr('opacity', 1)
+    linkSel.attr('opacity', 1)
     return
   }
-  nodeSel.attr('opacity', n => matchedIds.has(n.id) ? 1 : 0.08)
+  nodeSel.attr('opacity', n => matchedIds.has(n.id) ? 1 : 0.06)
+  glowSel.attr('opacity', n => matchedIds.has(n.id) ? 0.22 : 0.02)
   labelSel.attr('opacity', n => matchedIds.has(n.id) ? 1 : 0.04)
   linkSel.attr('opacity', 0.04)
 }
@@ -240,14 +305,6 @@ function setupQuery() {
 
   btn.addEventListener('click', doQuery)
 
-  // suggestion chips
-  document.querySelectorAll('.suggestion').forEach(s => {
-    s.addEventListener('click', () => {
-      input.value = s.dataset.q
-      input.dispatchEvent(new Event('input'))
-      doQuery()
-    })
-  })
 }
 
 async function doQuery() {
@@ -278,11 +335,13 @@ async function doQuery() {
     <div class="msg-assistant-header">
       <span class="msg-assistant-icon">✦</span> Wiki Assistant
     </div>
-    <div class="msg-body"><span class="cursor"></span></div>
+    <div class="msg-thinking"><span></span><span></span><span></span></div>
+    <div class="msg-body" style="display:none"></div>
   `
   messages.appendChild(aMsg)
   messages.scrollTop = messages.scrollHeight
 
+  const thinking = aMsg.querySelector('.msg-thinking')
   const body = aMsg.querySelector('.msg-body')
   let raw = ''
 
@@ -307,7 +366,6 @@ async function doQuery() {
         try {
           const parsed = JSON.parse(data)
           if (parsed.sources) {
-            // show which pages were selected
             sourcesEl = document.createElement('div')
             sourcesEl.className = 'msg-sources'
             sourcesEl.innerHTML = `<span class="sources-label">参考页面：</span>` +
@@ -315,7 +373,10 @@ async function doQuery() {
             aMsg.querySelector('.msg-assistant-header').after(sourcesEl)
           }
           if (parsed.error) { raw += `\n\n**错误：** ${parsed.error}`; break }
-          if (parsed.text)  raw += parsed.text
+          if (parsed.text) {
+            if (!raw) { thinking.style.display = 'none'; body.style.display = '' }
+            raw += parsed.text
+          }
         } catch {}
       }
       body.innerHTML = marked.parse(raw) + '<span class="cursor"></span>'
@@ -325,6 +386,8 @@ async function doQuery() {
     raw = `请求失败：${e.message}`
   }
 
+  thinking.style.display = 'none'
+  body.style.display = ''
   body.innerHTML = marked.parse(raw)
   messages.scrollTop = messages.scrollHeight
   document.getElementById('send-btn').disabled = false
@@ -500,47 +563,77 @@ function setupIngest() {
   const fileInput = document.getElementById('file-input')
   let selectedFiles = []
 
-  dropZone.addEventListener('click', (e) => {
-    if (e.target.closest('label')) return
-    fileInput.click()
-  })
+  dropZone.addEventListener('click', e => { if (!e.target.closest('label')) fileInput.click() })
   dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over') })
   dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'))
   dropZone.addEventListener('drop', e => {
     e.preventDefault()
     dropZone.classList.remove('drag-over')
-    setFiles([...e.dataTransfer.files])
+    addFiles([...e.dataTransfer.files])
   })
+  fileInput.addEventListener('change', () => { addFiles([...fileInput.files]); fileInput.value = '' })
 
-  fileInput.addEventListener('change', () => setFiles([...fileInput.files]))
+  function addFiles(files) {
+    const valid = files.filter(f => f.name.endsWith('.md') || f.name.endsWith('.txt'))
+    const existing = new Set(selectedFiles.map(f => f.name))
+    for (const f of valid) if (!existing.has(f.name)) selectedFiles.push(f)
+    renderFileList()
+  }
 
-  function setFiles(files) {
-    selectedFiles = files.filter(f => f.name.endsWith('.md') || f.name.endsWith('.txt'))
-    if (!selectedFiles.length) return
-    document.getElementById('drop-label').textContent = selectedFiles.map(f => f.name).join(', ')
-    document.getElementById('drop-sub').textContent = `${selectedFiles.length} 个文件已选择`
+  function removeFile(i) {
+    selectedFiles.splice(i, 1)
+    renderFileList()
+  }
+
+  function renderFileList() {
+    const list = document.getElementById('file-list')
     const btn = document.getElementById('ingest-file-btn')
-    btn.style.display = 'block'
-    btn.textContent = `上传 ${selectedFiles.length} 个文件`
+    list.innerHTML = selectedFiles.map((f, i) => `
+      <div class="file-entry">
+        <span class="file-entry-name">${f.name}</span>
+        <span class="file-entry-size">${(f.size / 1024).toFixed(1)} KB</span>
+        <button class="file-entry-remove" data-i="${i}">✕</button>
+      </div>
+    `).join('')
+    list.querySelectorAll('.file-entry-remove').forEach(b => {
+      b.addEventListener('click', () => removeFile(+b.dataset.i))
+    })
+    btn.disabled = selectedFiles.length === 0
+    btn.textContent = selectedFiles.length > 0 ? `上传 ${selectedFiles.length} 个文件` : '上传文件'
   }
 
   document.getElementById('ingest-file-btn').addEventListener('click', () => {
     if (!selectedFiles.length) return
-    runUpload(selectedFiles)
+    const toUpload = [...selectedFiles]
+    selectedFiles = []
+    renderFileList()
+    runUpload(toUpload)
   })
 
+  document.getElementById('run-now-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('run-now-btn')
+    btn.disabled = true
+    btn.textContent = '已触发'
+    await fetch('/api/ingest/run-now', { method: 'POST' }).catch(() => {})
+    setTimeout(loadIngestStatus, 1500)
+    setTimeout(loadIngestStatus, 6000)
+  })
+
+  loadIngestStatus()
 }
 
 async function runUpload(files) {
   const btn = document.getElementById('ingest-file-btn')
   btn.disabled = true
-  const fd = new FormData()
-  files.forEach(f => fd.append('files', f))
 
   const logWrap = document.getElementById('ingest-log-wrap')
   const logEl = document.getElementById('ingest-log')
   logWrap.style.display = 'block'
   logEl.innerHTML = ''
+  document.getElementById('ingest-log-title').textContent = '上传结果'
+
+  const fd = new FormData()
+  files.forEach(f => fd.append('files', f))
 
   try {
     const res = await fetch('/api/upload', { method: 'POST', body: fd }).then(r => r.json())
@@ -555,6 +648,7 @@ async function runUpload(files) {
     done.innerHTML = `<span>✓</span><span>${res.uploaded.length} 个文件已上传，等待自动处理</span>`
     logEl.appendChild(done)
     document.getElementById('ingest-log-title').textContent = '上传完成'
+    loadIngestStatus()
   } catch (e) {
     const err = document.createElement('div')
     err.className = 'log-item error'
@@ -562,6 +656,40 @@ async function runUpload(files) {
     logEl.appendChild(err)
   }
   btn.disabled = false
+}
+
+async function loadIngestStatus() {
+  const info = document.getElementById('scheduler-info')
+  const pendingSection = document.getElementById('pending-section')
+  const pendingList = document.getElementById('pending-list')
+  const runBtn = document.getElementById('run-now-btn')
+  if (!info) return
+  try {
+    const s = await fetch('/api/ingest/status').then(r => r.json())
+    const lastRun = s.lastRun
+      ? new Date(s.lastRun).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+      : null
+    info.innerHTML = `
+      <div class="sched-row">
+        <span class="sched-dot ${s.running ? 'running' : s.enabled ? 'on' : 'off'}"></span>
+        <span>${s.running ? '处理中' : s.enabled ? '已启用' : '已禁用'}</span>
+        <span class="sched-cron">${s.schedule}</span>
+      </div>
+      ${lastRun && s.lastResult ? `<div class="sched-last">上次 ${lastRun} · ${s.lastResult}</div>` : ''}
+    `
+    runBtn.disabled = s.running
+    runBtn.textContent = s.running ? '处理中…' : '立即处理'
+    if (s.pending?.length) {
+      pendingSection.style.display = ''
+      pendingList.innerHTML = s.pending.map(f =>
+        `<div class="pending-item"><span>◦</span><span>${f}</span></div>`
+      ).join('')
+    } else {
+      pendingSection.style.display = 'none'
+    }
+  } catch {
+    info.innerHTML = `<span class="sched-offline">服务未启动</span>`
+  }
 }
 
 
