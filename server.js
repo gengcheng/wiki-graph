@@ -203,7 +203,13 @@ app.get('/api/page/*', (req, res) => {
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Not found' })
   const raw = fs.readFileSync(filePath, 'utf8')
   const { data, content } = matter(raw)
-  const cleaned = content.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target, label) => `**${label || target}**`)
+  const files = globSync('**/*.md', { cwd: WIKI_PATH })
+  const titleMap = buildTitleMap(files, WIKI_PATH)
+  const cleaned = content.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target, label) => {
+    const text = (label || target).trim()
+    const resolved = resolveLink(target.trim(), titleMap)
+    return resolved ? `[${text}](wiki:${resolved})` : `**${text}**`
+  })
   res.json({ meta: data, html: marked(cleaned) })
 })
 

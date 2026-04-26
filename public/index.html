@@ -13,7 +13,7 @@
   <nav id="left-menu">
     <div id="menu-logo">
       <span class="logo-icon">◈</span>
-      <span class="logo-text">Wiki</span>
+      <span class="logo-text">LLM Wiki</span>
     </div>
     <div id="menu-items">
       <button class="menu-item active" data-view="query">
@@ -85,12 +85,6 @@
             <div class="welcome-icon">✦</div>
             <h2>向知识库提问</h2>
             <p>基于你的 wiki 内容回答问题</p>
-            <div id="query-suggestions">
-              <button class="suggestion" data-q="我的 eFootball 阵容有哪些 T0 球员？">eFootball T0 阵容</button>
-              <button class="suggestion" data-q="总结一下我的投资框架">我的投资框架</button>
-              <button class="suggestion" data-q="我的医保还差多少年？">医保缴费情况</button>
-              <button class="suggestion" data-q="我的健身心得有哪些">健身心得</button>
-            </div>
           </div>
         </div>
       </div>
@@ -129,23 +123,44 @@
     <!-- View: Ingest -->
     <div id="view-ingest" class="view">
       <div id="ingest-container">
-        <div id="ingest-header">
-          <h2>上传文件</h2>
-          <p>上传 .md 文件到 raw/ingest，等待自动处理</p>
-        </div>
-        <div id="drop-zone">
-          <div id="drop-icon">↓</div>
-          <div id="drop-label">拖拽 .md 文件到此处</div>
-          <div id="drop-sub">或 <label id="drop-browse" for="file-input">点击选择文件</label>（支持多选）</div>
-          <input type="file" id="file-input" accept=".md,.txt" multiple>
-        </div>
-        <button id="ingest-file-btn" style="display:none">上传文件</button>
-        <div id="ingest-log-wrap" style="display:none">
-          <div id="ingest-log-header">
-            <span id="ingest-log-title">上传结果</span>
+
+        <!-- Upload card -->
+        <div class="ingest-card">
+          <div class="ingest-card-hd">
+            <div>
+              <h2>上传文件</h2>
+              <p>上传到 raw/ingest，由定时任务自动处理</p>
+            </div>
           </div>
-          <div id="ingest-log"></div>
+          <div id="drop-zone">
+            <div id="drop-icon">↑</div>
+            <div id="drop-label">拖拽 .md 文件到此处</div>
+            <div id="drop-sub">或 <label id="drop-browse" for="file-input">点击选择文件</label>（支持多选）</div>
+            <input type="file" id="file-input" accept=".md,.txt" multiple>
+          </div>
+          <div id="file-list"></div>
+          <button id="ingest-file-btn" disabled>上传文件</button>
+          <div id="ingest-log-wrap" style="display:none">
+            <div id="ingest-log-header">
+              <span id="ingest-log-title">上传结果</span>
+            </div>
+            <div id="ingest-log"></div>
+          </div>
         </div>
+
+        <!-- Status card -->
+        <div class="ingest-card">
+          <div class="ingest-card-hd">
+            <h2>定时任务</h2>
+            <button id="run-now-btn">立即处理</button>
+          </div>
+          <div id="scheduler-info"></div>
+          <div id="pending-section" style="display:none">
+            <div class="pending-hd">待处理文件</div>
+            <div id="pending-list"></div>
+          </div>
+        </div>
+
       </div>
     </div>
 
