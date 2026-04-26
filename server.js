@@ -13,6 +13,20 @@ const cron = require('node-cron')
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js')
 const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js')
 const { z } = require('zod')
+const Redis = require('ioredis')
+
+let redis = null
+try {
+  redis = new Redis({
+    host: process.env.REDIS_HOST || 'localhost',
+    port: parseInt(process.env.REDIS_PORT || '6379', 10),
+    password: process.env.REDIS_PASSWORD || undefined,
+    lazyConnect: true,
+    enableOfflineQueue: false
+  })
+  redis.on('error', () => {})
+  redis.connect().catch(() => {})
+} catch {}
 
 const app = express()
 const WIKI_PATH = process.env.WIKI_PATH || path.join(process.cwd(), 'wiki', 'wiki')
@@ -26,6 +40,32 @@ const QUERY_LANG_INSTRUCTION = {
 
 app.use(express.static('public'))
 
+// gray-matter wrapper that never throws — filenames with quotes produce invalid YAML frontmatter
+function safeMatter(raw) {
+  try {
+    return matter(raw)
+  } catch {
+    // return bare content with no frontmatter
+    const stripped = raw.replace(/^---[\s\S]*?---\n?/, '')
+    return { data: {}, content: stripped }
+  }
+}
+
+// After LLM writes a file, re-serialize the sources field so special chars are safe YAML.
+// Uses single-quoted YAML scalars which accept any char except bare single-quotes (which are doubled).
+function fixSourcesField(filePath, rawFileName) {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8')
+    try { matter(raw); return } catch {}  // already valid, nothing to do
+    const singleQuoted = rawFileName.replace(/'/g, "''")
+    const fixed = raw.replace(
+      /^sources\s*:.*$/m,
+      `sources:\n  - 'raw/${singleQuoted}'`
+    )
+    fs.writeFileSync(filePath, fixed)
+  } catch {}
+}
+
 // strip parentheticals: "Agile Development (敏捷开发)" → "agile development"
 function normText(text) {
   return text.replace(/\s*[\(（][^)）]*[\)）]/g, '').trim().toLowerCase()
@@ -35,7 +75,7 @@ function buildTitleMap(files, cwd) {
   const map = {}
   for (const file of files) {
     const raw = fs.readFileSync(path.join(cwd, file), 'utf8')
-    const { data } = matter(raw)
+    const { data } = safeMatter(raw)
     const id = file.replace(/\.md$/, '')
     const title = data.title != null ? String(data.title) : path.basename(id)
     map[title.toLowerCase()] = id
@@ -154,7 +194,7 @@ function buildGraph() {
   for (const file of files) {
     const fullPath = path.join(WIKI_PATH, file)
     const content = fs.readFileSync(fullPath, 'utf8')
-    const { data } = matter(content)
+    const { data } = safeMatter(content)
     const id = file.replace(/\.md$/, '')
     const title = data.title != null ? String(data.title) : path.basename(id)
 
@@ -202,7 +242,7 @@ app.get('/api/page/*', (req, res) => {
   const filePath = path.join(WIKI_PATH, req.params[0] + '.md')
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Not found' })
   const raw = fs.readFileSync(filePath, 'utf8')
-  const { data, content } = matter(raw)
+  const { data, content } = safeMatter(raw)
   const files = globSync('**/*.md', { cwd: WIKI_PATH })
   const titleMap = buildTitleMap(files, WIKI_PATH)
   const cleaned = content.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target, label) => {
@@ -268,7 +308,7 @@ function getProcessedIngestFiles() {
     const files = globSync('**/*.md', { cwd: WIKI_PATH })
     for (const file of files) {
       const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
-      const { data } = matter(raw)
+      const { data } = safeMatter(raw)
       const sources = Array.isArray(data.sources) ? data.sources : (data.sources ? [data.sources] : [])
       for (const src of sources) {
         const s = String(src)
@@ -374,6 +414,7 @@ ${existingIndex}`
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
     const existed = fs.existsSync(fullFilePath)
     fs.writeFileSync(fullFilePath, fileContent)
+    fixSourcesField(fullFilePath, rawFileName)
     created.push(relPath)
     send(existed ? 'updated' : 'created', relPath)
   }
@@ -541,7 +582,7 @@ app.get('/api/lint', (req, res) => {
   const pageData = {}
   for (const file of files) {
     const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
-    const { data, content } = matter(raw)
+    const { data, content } = safeMatter(raw)
     const id = file.replace(/\.md$/, '')
     const title = data.title != null ? String(data.title) : id
     pageData[id] = { file, title, content, data, type: data.type }
@@ -621,7 +662,7 @@ function buildPageData() {
   const pageData = {}
   for (const file of files) {
     const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
-    const { data, content } = matter(raw)
+    const { data, content } = safeMatter(raw)
     const id = file.replace(/\.md$/, '')
     pageData[id] = { file, content, data, title: data.title != null ? String(data.title) : path.basename(id) }
   }
@@ -655,7 +696,7 @@ app.post('/api/lint/fix', (req, res) => {
       for (const file of files) {
         const id = file.replace(/\.md$/, '')
         const stem = path.basename(id).replace(/-/g, ' ').toLowerCase()
-        const { data } = matter(fs.readFileSync(path.join(WIKI_PATH, file), 'utf8'))
+        const { data } = safeMatter(fs.readFileSync(path.join(WIKI_PATH, file), 'utf8'))
         const title = normText(data.title != null ? String(data.title) : '')
         if (stem.includes(noParens) || noParens.includes(stem) ||
             title.includes(noParens) || noParens.includes(title)) {
@@ -667,7 +708,7 @@ app.post('/api/lint/fix', (req, res) => {
       if (!aliases.map(a => String(a).toLowerCase()).includes(key)) {
         aliases.push(text)
         const fullPath = path.join(WIKI_PATH, best.file)
-        const parsed = matter(fs.readFileSync(fullPath, 'utf8'))
+        const parsed = safeMatter(fs.readFileSync(fullPath, 'utf8'))
         parsed.data.aliases = aliases
         fs.writeFileSync(fullPath, matter.stringify(parsed.content, parsed.data))
         alreadyFixed.add(key)
@@ -758,7 +799,7 @@ async function queryWiki(question) {
   const files = globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['index.md'] })
   const pages = files.map(file => {
     const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
-    const { data, content } = matter(raw)
+    const { data, content } = safeMatter(raw)
     return { file, title: data.title != null ? String(data.title) : file, content }
   })
   const scored = pages.map(p => ({
@@ -789,7 +830,7 @@ app.post('/api/query', express.json(), async (req, res) => {
   const files = globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['index.md'] })
   const pages = files.map(file => {
     const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
-    const { data, content } = matter(raw)
+    const { data, content } = safeMatter(raw)
     return { file, title: data.title != null ? String(data.title) : file, content }
   })
   const scored = pages.map(p => ({
@@ -832,6 +873,103 @@ app.post('/api/query/sync', express.json(), async (req, res) => {
   if (!question) return res.status(400).json({ error: 'Missing question' })
   try {
     res.json(await queryWiki(question))
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── Conversation history (Redis → file fallback) ──────────────────────────────
+
+const CONV_TTL = 60 * 60 * 24 * 30  // 30 days
+const CONV_FILE = path.join(WIKI_ROOT, 'conversations.json')
+
+function redisReady() { return redis && redis.status === 'ready' }
+
+function loadConvFile() {
+  try { return JSON.parse(fs.readFileSync(CONV_FILE, 'utf8')) } catch { return {} }
+}
+
+function saveConvFile(data) {
+  try { fs.writeFileSync(CONV_FILE, JSON.stringify(data)) } catch {}
+}
+
+app.post('/api/conversation/save', express.json(), async (req, res) => {
+  const { conversationId, question, answer, sources } = req.body
+  if (!conversationId || !question) return res.status(400).json({ error: 'Missing fields' })
+  try {
+    if (redisReady()) {
+      const key = `wiki:conv:${conversationId}`
+      const entry = JSON.stringify({ question, answer: answer || '', sources: sources || [], timestamp: Date.now() })
+      await redis.rpush(key, entry)
+      await redis.expire(key, CONV_TTL)
+      await redis.zadd('wiki:conversations', Date.now(), conversationId)
+      await redis.expire('wiki:conversations', CONV_TTL)
+    } else {
+      const data = loadConvFile()
+      if (!data[conversationId]) data[conversationId] = { timestamp: Date.now(), messages: [] }
+      data[conversationId].messages.push({ question, answer: answer || '', sources: sources || [], timestamp: Date.now() })
+      data[conversationId].timestamp = Date.now()
+      saveConvFile(data)
+    }
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.get('/api/conversation/:id', async (req, res) => {
+  try {
+    if (redisReady()) {
+      const items = await redis.lrange(`wiki:conv:${req.params.id}`, 0, -1)
+      return res.json({ messages: items.map(i => JSON.parse(i)) })
+    }
+    const data = loadConvFile()
+    res.json({ messages: (data[req.params.id]?.messages) || [] })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/conversation/:id', async (req, res) => {
+  try {
+    if (redisReady()) {
+      await redis.del(`wiki:conv:${req.params.id}`)
+      await redis.zrem('wiki:conversations', req.params.id)
+    } else {
+      const data = loadConvFile()
+      delete data[req.params.id]
+      saveConvFile(data)
+    }
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.get('/api/conversations', async (req, res) => {
+  try {
+    if (redisReady()) {
+      const ids = await redis.zrevrange('wiki:conversations', 0, 29, 'WITHSCORES')
+      const conversations = []
+      for (let i = 0; i < ids.length; i += 2) {
+        const id = ids[i]
+        const timestamp = parseInt(ids[i + 1])
+        let preview = ''
+        try {
+          const first = await redis.lindex(`wiki:conv:${id}`, 0)
+          if (first) preview = (JSON.parse(first).question || '').slice(0, 60)
+        } catch {}
+        if (preview) conversations.push({ id, timestamp, preview })
+      }
+      return res.json({ conversations })
+    }
+    const data = loadConvFile()
+    const conversations = Object.entries(data)
+      .map(([id, conv]) => ({ id, timestamp: conv.timestamp, preview: (conv.messages[0]?.question || '').slice(0, 60) }))
+      .filter(c => c.preview)
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, 30)
+    res.json({ conversations })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
