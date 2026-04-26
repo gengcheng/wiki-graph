@@ -37,7 +37,7 @@ function buildTitleMap(files, cwd) {
     const raw = fs.readFileSync(path.join(cwd, file), 'utf8')
     const { data } = matter(raw)
     const id = file.replace(/\.md$/, '')
-    const title = data.title || path.basename(id)
+    const title = data.title != null ? String(data.title) : path.basename(id)
     map[title.toLowerCase()] = id
     const nt = normText(title)
     if (nt !== title.toLowerCase()) map[nt] = id
@@ -156,7 +156,7 @@ function buildGraph() {
     const content = fs.readFileSync(fullPath, 'utf8')
     const { data } = matter(content)
     const id = file.replace(/\.md$/, '')
-    const title = data.title || path.basename(id)
+    const title = data.title != null ? String(data.title) : path.basename(id)
 
     nodes.push({
       id,
@@ -543,7 +543,7 @@ app.get('/api/lint', (req, res) => {
     const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
     const { data, content } = matter(raw)
     const id = file.replace(/\.md$/, '')
-    const title = data.title || id
+    const title = data.title != null ? String(data.title) : id
     pageData[id] = { file, title, content, data, type: data.type }
   }
 
@@ -623,7 +623,7 @@ function buildPageData() {
     const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
     const { data, content } = matter(raw)
     const id = file.replace(/\.md$/, '')
-    pageData[id] = { file, content, data, title: data.title || path.basename(id) }
+    pageData[id] = { file, content, data, title: data.title != null ? String(data.title) : path.basename(id) }
   }
   return { files, titleMap, pageData }
 }
@@ -656,7 +656,7 @@ app.post('/api/lint/fix', (req, res) => {
         const id = file.replace(/\.md$/, '')
         const stem = path.basename(id).replace(/-/g, ' ').toLowerCase()
         const { data } = matter(fs.readFileSync(path.join(WIKI_PATH, file), 'utf8'))
-        const title = normText(data.title || '')
+        const title = normText(data.title != null ? String(data.title) : '')
         if (stem.includes(noParens) || noParens.includes(stem) ||
             title.includes(noParens) || noParens.includes(title)) {
           best = { id, file, data }; break
@@ -759,7 +759,7 @@ async function queryWiki(question) {
   const pages = files.map(file => {
     const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
     const { data, content } = matter(raw)
-    return { file, title: data.title || file, content }
+    return { file, title: data.title != null ? String(data.title) : file, content }
   })
   const scored = pages.map(p => ({
     ...p,
@@ -790,7 +790,7 @@ app.post('/api/query', express.json(), async (req, res) => {
   const pages = files.map(file => {
     const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
     const { data, content } = matter(raw)
-    return { file, title: data.title || file, content }
+    return { file, title: data.title != null ? String(data.title) : file, content }
   })
   const scored = pages.map(p => ({
     ...p,

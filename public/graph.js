@@ -615,8 +615,7 @@ function setupIngest() {
     btn.disabled = true
     btn.textContent = '已触发'
     await fetch('/api/ingest/run-now', { method: 'POST' }).catch(() => {})
-    setTimeout(loadIngestStatus, 1500)
-    setTimeout(loadIngestStatus, 6000)
+    setTimeout(() => pollIngestStatus(), 1500)
   })
 
   loadIngestStatus()
@@ -663,7 +662,7 @@ async function loadIngestStatus() {
   const pendingSection = document.getElementById('pending-section')
   const pendingList = document.getElementById('pending-list')
   const runBtn = document.getElementById('run-now-btn')
-  if (!info) return
+  if (!info) return false
   try {
     const s = await fetch('/api/ingest/status').then(r => r.json())
     const lastRun = s.lastRun
@@ -687,9 +686,16 @@ async function loadIngestStatus() {
     } else {
       pendingSection.style.display = 'none'
     }
+    return s.running
   } catch {
     info.innerHTML = `<span class="sched-offline">服务未启动</span>`
+    return false
   }
+}
+
+async function pollIngestStatus() {
+  const running = await loadIngestStatus()
+  if (running) setTimeout(pollIngestStatus, 2000)
 }
 
 
