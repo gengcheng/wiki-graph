@@ -25,6 +25,19 @@ const GROUP_LABEL = { entity: '实体', concept: '概念', topic: '主题', sour
 let allNodes = [], allEdges = []
 let simulation, linkSel, nodeSel, labelSel, glowSel
 let activeFilter = 'all'
+let currentConversationId = null
+
+function genConvId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+}
+
+function initConversation() {
+  currentConversationId = localStorage.getItem('wiki:conversationId')
+  if (!currentConversationId) {
+    currentConversationId = genConvId()
+    localStorage.setItem('wiki:conversationId', currentConversationId)
+  }
+}
 
 // ── Init ────────────────────────────────────────────────────────────────────
 
@@ -38,6 +51,7 @@ async function fetchData() {
 
 async function init() {
   await fetchData()
+  initConversation()
 
   setupMenu()
   setupGraph()
@@ -293,7 +307,6 @@ function setupQuery() {
   const input = document.getElementById('query-input')
   const btn   = document.getElementById('send-btn')
 
-  // auto-resize textarea
   input.addEventListener('input', () => {
     input.style.height = 'auto'
     input.style.height = Math.min(input.scrollHeight, 160) + 'px'
@@ -305,6 +318,133 @@ function setupQuery() {
 
   btn.addEventListener('click', doQuery)
 
+  document.getElementById('new-chat-btn').addEventListener('click', () => {
+    currentConversationId = genConvId()
+    localStorage.setItem('wiki:conversationId', currentConversationId)
+    resetMessages()
+    updateConvActiveState()
+    document.getElementById('query-input').focus()
+  })
+
+  loadConversations()
+}
+
+function resetMessages() {
+  document.getElementById('messages').innerHTML = `
+    <div id="query-welcome">
+      <div class="welcome-icon">✦</div>
+      <h2>向知识库提问</h2>
+      <p>基于你的 wiki 内容回答问题</p>
+    </div>`
+}
+
+function convTimeLabel(ts) {
+  const diff = Date.now() - ts
+  if (diff < 60000) return '刚刚'
+  if (diff < 3600000) return Math.floor(diff / 60000) + ' 分钟前'
+  if (diff < 86400000) return Math.floor(diff / 3600000) + ' 小时前'
+  const d = new Date(ts)
+  return `${d.getMonth() + 1}/${d.getDate()}`
+}
+
+function escHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function updateConvActiveState() {
+  document.querySelectorAll('.conv-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.id === currentConversationId)
+  })
+}
+
+async function loadConversations() {
+  const list = document.getElementById('conv-list')
+  if (!list) return
+  try {
+    const { conversations } = await fetch('/api/conversations').then(r => r.json())
+    if (!conversations.length) {
+      list.innerHTML = '<div class="conv-empty">暂无历史记录<br>开始提问后自动保存</div>'
+      return
+    }
+    list.innerHTML = ''
+    for (const conv of conversations) {
+      const item = document.createElement('div')
+      item.className = 'conv-item' + (conv.id === currentConversationId ? ' active' : '')
+      item.dataset.id = conv.id
+      item.style.display = 'flex'
+      item.style.alignItems = 'center'
+      item.style.gap = '6px'
+      item.innerHTML = `
+        <div class="conv-item-body">
+          <div class="conv-preview">${escHtml(conv.preview)}</div>
+          <div class="conv-time">${convTimeLabel(conv.timestamp)}</div>
+        </div>
+        <button class="conv-del" title="删除">✕</button>`
+      item.querySelector('.conv-item-body').addEventListener('click', () => loadConversation(conv.id))
+      item.querySelector('.conv-del').addEventListener('click', e => {
+        e.stopPropagation()
+        deleteConversation(conv.id, item)
+      })
+      list.appendChild(item)
+    }
+  } catch {
+    list.innerHTML = '<div class="conv-empty">无法连接 Redis</div>'
+  }
+}
+
+async function loadConversation(id) {
+  currentConversationId = id
+  localStorage.setItem('wiki:conversationId', id)
+  updateConvActiveState()
+
+  const messages = document.getElementById('messages')
+  messages.innerHTML = '<div style="padding:24px;color:var(--muted);font-size:13px">加载中…</div>'
+
+  try {
+    const { messages: history } = await fetch(`/api/conversation/${id}`).then(r => r.json())
+    messages.innerHTML = ''
+    for (const entry of history) {
+      const userMsg = document.createElement('div')
+      userMsg.className = 'msg-user'
+      userMsg.textContent = entry.question
+      messages.appendChild(userMsg)
+
+      const aMsg = document.createElement('div')
+      aMsg.className = 'msg-assistant'
+      let sourcesHtml = ''
+      if (entry.sources && entry.sources.length) {
+        sourcesHtml = `<div class="msg-sources"><span class="sources-label">参考页面：</span>` +
+          entry.sources.map(s => `<span class="source-chip">${s.replace(/^.*\//, '').replace(/\.md$/, '')}</span>`).join('') +
+          `</div>`
+      }
+      aMsg.innerHTML = `
+        <div class="msg-assistant-header"><span class="msg-assistant-icon">✦</span> Wiki Assistant</div>
+        ${sourcesHtml}
+        <div class="msg-body">${marked.parse(entry.answer)}</div>`
+      messages.appendChild(aMsg)
+    }
+    document.getElementById('messages-wrap').scrollTop = 999999
+  } catch {
+    messages.innerHTML = '<div style="padding:24px;color:#f87171;font-size:13px">加载失败</div>'
+  }
+}
+
+async function deleteConversation(id, itemEl) {
+  try {
+    await fetch(`/api/conversation/${id}`, { method: 'DELETE' })
+  } catch {}
+  itemEl.remove()
+  // if deleted conversation was active, start a new one
+  if (id === currentConversationId) {
+    currentConversationId = genConvId()
+    localStorage.setItem('wiki:conversationId', currentConversationId)
+    resetMessages()
+  }
+  // show empty state if no items left
+  const list = document.getElementById('conv-list')
+  if (list && !list.querySelector('.conv-item')) {
+    list.innerHTML = '<div class="conv-empty">暂无历史记录<br>开始提问后自动保存</div>'
+  }
 }
 
 async function doQuery() {
@@ -344,6 +484,7 @@ async function doQuery() {
   const thinking = aMsg.querySelector('.msg-thinking')
   const body = aMsg.querySelector('.msg-body')
   let raw = ''
+  let savedSources = []
 
   try {
     const res = await fetch('/api/query', {
@@ -366,6 +507,7 @@ async function doQuery() {
         try {
           const parsed = JSON.parse(data)
           if (parsed.sources) {
+            savedSources = parsed.sources
             sourcesEl = document.createElement('div')
             sourcesEl.className = 'msg-sources'
             sourcesEl.innerHTML = `<span class="sources-label">参考页面：</span>` +
@@ -391,6 +533,14 @@ async function doQuery() {
   body.innerHTML = marked.parse(raw)
   messages.scrollTop = messages.scrollHeight
   document.getElementById('send-btn').disabled = false
+
+  if (currentConversationId && raw) {
+    fetch('/api/conversation/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversationId: currentConversationId, question, answer: raw, sources: savedSources })
+    }).then(() => loadConversations()).catch(() => {})
+  }
 }
 
 // ── Files View ───────────────────────────────────────────────────────────────

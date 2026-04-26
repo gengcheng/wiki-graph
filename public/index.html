@@ -79,23 +79,35 @@
 
     <!-- View: Query -->
     <div id="view-query" class="view active">
-      <div id="messages-wrap">
-        <div id="messages">
-          <div id="query-welcome">
-            <div class="welcome-icon">✦</div>
-            <h2>向知识库提问</h2>
-            <p>基于你的 wiki 内容回答问题</p>
+      <div id="query-topbar">
+        <span id="query-topbar-title">智能问答</span>
+        <button id="new-chat-btn">+ 新问答</button>
+      </div>
+      <div id="query-body">
+        <div id="conv-sidebar">
+          <div id="conv-sidebar-hd">历史问答</div>
+          <div id="conv-list"></div>
+        </div>
+        <div id="query-main">
+          <div id="messages-wrap">
+            <div id="messages">
+              <div id="query-welcome">
+                <div class="welcome-icon">✦</div>
+                <h2>向知识库提问</h2>
+                <p>基于你的 wiki 内容回答问题</p>
+              </div>
+            </div>
+          </div>
+          <div id="query-bar-wrap">
+            <div id="query-bar">
+              <textarea id="query-input" placeholder="向知识库提问…" rows="1"></textarea>
+              <button id="send-btn">
+                <span>↑</span>
+              </button>
+            </div>
+            <div id="query-hint">按 Enter 发送 · Shift+Enter 换行</div>
           </div>
         </div>
-      </div>
-      <div id="query-bar-wrap">
-        <div id="query-bar">
-          <textarea id="query-input" placeholder="向知识库提问…" rows="1"></textarea>
-          <button id="send-btn">
-            <span>↑</span>
-          </button>
-        </div>
-        <div id="query-hint">按 Enter 发送 · Shift+Enter 换行</div>
       </div>
     </div>
 
