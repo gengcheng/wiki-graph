@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <title>Wiki</title>
+  <script src="d3.v7.min.js"></script>
+  <script src="marked.min.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Left Menu -->
+  <nav id="left-menu">
+    <div id="menu-logo">
+      <span class="logo-icon">◈</span>
+      <span class="logo-text">Wiki</span>
+    </div>
+    <div id="menu-items">
+      <button class="menu-item active" data-view="query">
+        <span class="menu-icon">✦</span>
+        <span class="menu-label">智能问答</span>
+      </button>
+      <button class="menu-item" data-view="graph">
+        <span class="menu-icon">⬡</span>
+        <span class="menu-label">知识图谱</span>
+      </button>
+      <button class="menu-item" data-view="files">
+        <span class="menu-icon">◫</span>
+        <span class="menu-label">文件浏览</span>
+      </button>
+      <button class="menu-item" data-view="ingest">
+        <span class="menu-icon">↓</span>
+        <span class="menu-label">摄入</span>
+      </button>
+      <button class="menu-item" data-view="lint">
+        <span class="menu-icon">✓</span>
+        <span class="menu-label">健康检查</span>
+      </button>
+    </div>
+    <div id="menu-footer">
+      <div id="kb-stats"></div>
+    </div>
+  </nav>
+
+  <!-- Main Content -->
+  <main id="content">
+
+    <!-- View: Graph -->
+    <div id="view-graph" class="view">
+      <div id="graph-toolbar">
+        <div id="filter-bar">
+          <button class="filter active" data-type="all">全部</button>
+          <button class="filter" data-type="entity">
+            <span class="dot entity"></span>实体
+          </button>
+          <button class="filter" data-type="concept">
+            <span class="dot concept"></span>概念
+          </button>
+          <button class="filter" data-type="topic">
+            <span class="dot topic"></span>主题
+          </button>
+          <button class="filter" data-type="source">
+            <span class="dot source"></span>源
+          </button>
+        </div>
+        <input id="graph-search" type="text" placeholder="搜索节点…" autocomplete="off">
+      </div>
+      <svg id="graph"></svg>
+      <div id="node-panel">
+        <div id="node-panel-header">
+          <span id="node-type-badge"></span>
+          <button id="node-panel-close">✕</button>
+        </div>
+        <h2 id="node-title"></h2>
+        <div id="node-content"></div>
+      </div>
+      <div id="tooltip"></div>
+    </div>
+
+    <!-- View: Query -->
+    <div id="view-query" class="view active">
+      <div id="messages-wrap">
+        <div id="messages">
+          <div id="query-welcome">
+            <div class="welcome-icon">✦</div>
+            <h2>向知识库提问</h2>
+            <p>基于你的 wiki 内容回答问题</p>
+            <div id="query-suggestions">
+              <button class="suggestion" data-q="我的 eFootball 阵容有哪些 T0 球员？">eFootball T0 阵容</button>
+              <button class="suggestion" data-q="总结一下我的投资框架">我的投资框架</button>
+              <button class="suggestion" data-q="我的医保还差多少年？">医保缴费情况</button>
+              <button class="suggestion" data-q="我的健身心得有哪些">健身心得</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="query-bar-wrap">
+        <div id="query-bar">
+          <textarea id="query-input" placeholder="向知识库提问…" rows="1"></textarea>
+          <button id="send-btn">
+            <span>↑</span>
+          </button>
+        </div>
+        <div id="query-hint">按 Enter 发送 · Shift+Enter 换行</div>
+      </div>
+    </div>
+
+    <!-- View: Files -->
+    <div id="view-files" class="view">
+      <div id="files-sidebar">
+        <div id="files-search-wrap">
+          <input id="files-search" type="text" placeholder="搜索文件…" autocomplete="off">
+        </div>
+        <div id="files-tree"></div>
+      </div>
+      <div id="files-content">
+        <div id="files-welcome">
+          <div class="welcome-icon">◫</div>
+          <p>选择左侧文件查看内容</p>
+        </div>
+        <div id="file-header" style="display:none">
+          <span id="file-type-badge"></span>
+          <h2 id="file-title"></h2>
+        </div>
+        <div id="file-body"></div>
+      </div>
+    </div>
+
+    <!-- View: Ingest -->
+    <div id="view-ingest" class="view">
+      <div id="ingest-container">
+        <div id="ingest-header">
+          <h2>上传文件</h2>
+          <p>上传 .md 文件到 raw/ingest，等待自动处理</p>
+        </div>
+        <div id="drop-zone">
+          <div id="drop-icon">↓</div>
+          <div id="drop-label">拖拽 .md 文件到此处</div>
+          <div id="drop-sub">或 <label id="drop-browse" for="file-input">点击选择文件</label>（支持多选）</div>
+          <input type="file" id="file-input" accept=".md,.txt" multiple>
+        </div>
+        <button id="ingest-file-btn" style="display:none">上传文件</button>
+        <div id="ingest-log-wrap" style="display:none">
+          <div id="ingest-log-header">
+            <span id="ingest-log-title">上传结果</span>
+          </div>
+          <div id="ingest-log"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- View: Lint -->
+    <div id="view-lint" class="view">
+      <div id="lint-container">
+        <div id="lint-header">
+          <div>
+            <h2>知识库健康检查</h2>
+            <p>检查断链、Frontmatter、孤岛页面和 Ghost 文件</p>
+          </div>
+          <button id="lint-btn">开始检查</button>
+        </div>
+        <div id="lint-stats" style="display:none">
+          <div class="stat-card error">
+            <div class="stat-num" id="stat-errors">0</div>
+            <div class="stat-label">错误</div>
+          </div>
+          <div class="stat-card warning">
+            <div class="stat-num" id="stat-warnings">0</div>
+            <div class="stat-label">警告</div>
+          </div>
+          <div class="stat-card pass">
+            <div class="stat-num" id="stat-checks">0</div>
+            <div class="stat-label">通过</div>
+          </div>
+        </div>
+        <div id="lint-results"></div>
+      </div>
+    </div>
+
+  </main>
+
+  <script src="graph.js"></script>
+</body>
+</html>
