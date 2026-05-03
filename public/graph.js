@@ -32,11 +32,7 @@ function genConvId() {
 }
 
 function initConversation() {
-  currentConversationId = localStorage.getItem('wiki:conversationId')
-  if (!currentConversationId) {
-    currentConversationId = genConvId()
-    localStorage.setItem('wiki:conversationId', currentConversationId)
-  }
+  currentConversationId = genConvId()
 }
 
 // ── Init ────────────────────────────────────────────────────────────────────
@@ -57,6 +53,7 @@ async function init() {
   setupGraph()
   setupQuery()
   setupFiles()
+  setupTags()
   setupIngest()
   setupLint()
 }
@@ -313,14 +310,24 @@ function setupQuery() {
   })
 
   input.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doQuery() }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); doQuery() }
   })
 
   btn.addEventListener('click', doQuery)
 
+  document.getElementById('qpp-close').addEventListener('click', () => {
+    document.getElementById('query-page-panel').classList.remove('open')
+  })
+
+  document.getElementById('query-main').addEventListener('click', e => {
+    const panel = document.getElementById('query-page-panel')
+    if (panel.classList.contains('open') && !panel.contains(e.target)) {
+      panel.classList.remove('open')
+    }
+  })
+
   document.getElementById('new-chat-btn').addEventListener('click', () => {
     currentConversationId = genConvId()
-    localStorage.setItem('wiki:conversationId', currentConversationId)
     resetMessages()
     updateConvActiveState()
     document.getElementById('query-input').focus()
@@ -394,7 +401,6 @@ async function loadConversations() {
 
 async function loadConversation(id) {
   currentConversationId = id
-  localStorage.setItem('wiki:conversationId', id)
   updateConvActiveState()
 
   const messages = document.getElementById('messages')
@@ -411,16 +417,24 @@ async function loadConversation(id) {
 
       const aMsg = document.createElement('div')
       aMsg.className = 'msg-assistant'
-      let sourcesHtml = ''
-      if (entry.sources && entry.sources.length) {
-        sourcesHtml = `<div class="msg-sources"><span class="sources-label">参考页面：</span>` +
-          entry.sources.map(s => `<span class="source-chip">${s.replace(/^.*\//, '').replace(/\.md$/, '')}</span>`).join('') +
-          `</div>`
-      }
       aMsg.innerHTML = `
         <div class="msg-assistant-header"><span class="msg-assistant-icon">✦</span> Wiki Assistant</div>
-        ${sourcesHtml}
-        <div class="msg-body">${marked.parse(entry.answer)}</div>`
+        <div class="msg-body">${marked.parse(resolveWikilinks(entry.answer))}</div>`
+      if (entry.sources && entry.sources.length) {
+        const sourcesEl = document.createElement('div')
+        sourcesEl.className = 'msg-sources'
+        sourcesEl.innerHTML = `<span class="sources-label">参考页面：</span>` +
+          entry.sources.map(s => {
+            const id = s.replace(/\.md$/, '')
+            const label = s.replace(/^.*\//, '').replace(/\.md$/, '')
+            return `<span class="source-chip" data-id="${id}">${label}</span>`
+          }).join('')
+        sourcesEl.querySelectorAll('.source-chip[data-id]').forEach(chip => {
+          chip.addEventListener('click', e => { e.stopPropagation(); openQueryPagePanel(chip.dataset.id) })
+        })
+        aMsg.querySelector('.msg-assistant-header').after(sourcesEl)
+      }
+      bindWikilinkClicks(aMsg.querySelector('.msg-body'))
       messages.appendChild(aMsg)
     }
     document.getElementById('messages-wrap').scrollTop = 999999
@@ -437,7 +451,6 @@ async function deleteConversation(id, itemEl) {
   // if deleted conversation was active, start a new one
   if (id === currentConversationId) {
     currentConversationId = genConvId()
-    localStorage.setItem('wiki:conversationId', currentConversationId)
     resetMessages()
   }
   // show empty state if no items left
@@ -445,6 +458,49 @@ async function deleteConversation(id, itemEl) {
   if (list && !list.querySelector('.conv-item')) {
     list.innerHTML = '<div class="conv-empty">暂无历史记录<br>开始提问后自动保存</div>'
   }
+}
+
+function resolveWikilinks(raw) {
+  return raw.replace(/\[\[([^\]|#]+)(?:\|([^\]]+))?\]\]/g, (_, target, label) => {
+    const text = (label || target).trim()
+    const lc = target.trim().toLowerCase()
+    const node = allNodes.find(n =>
+      n.title.toLowerCase() === lc ||
+      n.id.split('/').pop().toLowerCase().replace(/-/g, ' ') === lc ||
+      n.id.toLowerCase() === lc
+    )
+    return node ? `[${text}](wiki:${node.id})` : `**${text}**`
+  })
+}
+
+function bindWikilinkClicks(el) {
+  el.querySelectorAll('a[href^="wiki:"]').forEach(a => {
+    a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openQueryPagePanel(a.getAttribute('href').slice(5)) })
+  })
+}
+
+async function openQueryPagePanel(pageId) {
+  const panel = document.getElementById('query-page-panel')
+  panel.classList.add('open')
+
+  document.getElementById('qpp-badge').textContent = ''
+  document.getElementById('qpp-title').textContent = pageId.split('/').pop()
+  document.getElementById('qpp-content').innerHTML = '<span class="cursor"></span>'
+
+  try {
+    const data = await fetch(`/api/page/${encodeURIComponent(pageId)}`).then(r => r.json())
+    const nodeType = data.meta?.type || 'unknown'
+    const b = BADGE[nodeType] || BADGE.unknown
+    const badge = document.getElementById('qpp-badge')
+    badge.textContent = nodeType
+    badge.style.background = b.bg
+    badge.style.color = b.color
+    document.getElementById('qpp-title').textContent = data.meta?.title || pageId.split('/').pop()
+    document.getElementById('qpp-content').innerHTML = data.html
+    document.querySelectorAll('#qpp-content a[href^="wiki:"]').forEach(a => {
+      a.addEventListener('click', e => { e.preventDefault(); openQueryPagePanel(a.getAttribute('href').slice(5)) })
+    })
+  } catch {}
 }
 
 async function doQuery() {
@@ -511,7 +567,14 @@ async function doQuery() {
             sourcesEl = document.createElement('div')
             sourcesEl.className = 'msg-sources'
             sourcesEl.innerHTML = `<span class="sources-label">参考页面：</span>` +
-              parsed.sources.map(s => `<span class="source-chip">${s.replace(/^.*\//, '').replace(/\.md$/, '')}</span>`).join('')
+              parsed.sources.map(s => {
+                const id = s.replace(/\.md$/, '')
+                const label = s.replace(/^.*\//, '').replace(/\.md$/, '')
+                return `<span class="source-chip" data-id="${id}">${label}</span>`
+              }).join('')
+            sourcesEl.querySelectorAll('.source-chip[data-id]').forEach(chip => {
+              chip.addEventListener('click', e => { e.stopPropagation(); openQueryPagePanel(chip.dataset.id) })
+            })
             aMsg.querySelector('.msg-assistant-header').after(sourcesEl)
           }
           if (parsed.error) { raw += `\n\n**错误：** ${parsed.error}`; break }
@@ -521,7 +584,7 @@ async function doQuery() {
           }
         } catch {}
       }
-      body.innerHTML = marked.parse(raw) + '<span class="cursor"></span>'
+      body.innerHTML = marked.parse(resolveWikilinks(raw)) + '<span class="cursor"></span>'
       messages.scrollTop = messages.scrollHeight
     }
   } catch (e) {
@@ -530,7 +593,8 @@ async function doQuery() {
 
   thinking.style.display = 'none'
   body.style.display = ''
-  body.innerHTML = marked.parse(raw)
+  body.innerHTML = marked.parse(resolveWikilinks(raw))
+  bindWikilinkClicks(body)
   messages.scrollTop = messages.scrollHeight
   document.getElementById('send-btn').disabled = false
 
@@ -566,6 +630,7 @@ async function setupFiles() {
       nodes.sort((a, b) => a.title.localeCompare(b.title)).map(node => ({
         id: node.id,
         label: node.title,
+        tags: node.tags || [],
         color: NODE_COLOR[type],
         onClick: btn => loadFile(node, btn)
       }))
@@ -600,7 +665,7 @@ async function setupFiles() {
   document.getElementById('files-search').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim()
     document.querySelectorAll('.file-item').forEach(btn => {
-      btn.style.display = !q || btn.textContent.toLowerCase().includes(q) ? '' : 'none'
+      btn.style.display = !q || btn.textContent.toLowerCase().includes(q) || btn.dataset.tags.includes(q) ? '' : 'none'
     })
     document.querySelectorAll('.files-group').forEach(g => {
       const visible = [...g.querySelectorAll('.file-item')].some(b => b.style.display !== 'none')
@@ -630,6 +695,7 @@ function makeGroup(headerHTML, items, collapsed = false) {
     const btn = document.createElement('button')
     btn.className = 'file-item'
     btn.dataset.id = item.id || ''
+    btn.dataset.tags = (item.tags || []).join(' ').toLowerCase()
     btn.innerHTML = `<span class="file-dot" style="background:${item.color}"></span>${item.label}`
     btn.title = item.label
     btn.addEventListener('click', () => item.onClick(btn))
@@ -706,13 +772,220 @@ async function loadFile(node, btn) {
   })
 }
 
+// ── Tags View ────────────────────────────────────────────────────────────────
+
+async function openTagsPagePanel(pageId) {
+  const panel = document.getElementById('tags-page-panel')
+  panel.classList.add('open')
+  document.getElementById('tpp-badge').textContent = ''
+  document.getElementById('tpp-title').textContent = pageId.split('/').pop()
+  document.getElementById('tpp-content').innerHTML = '<span class="cursor"></span>'
+  try {
+    const data = await fetch(`/api/page/${encodeURIComponent(pageId)}`).then(r => r.json())
+    const nodeType = data.meta?.type || 'unknown'
+    const b = BADGE[nodeType] || BADGE.unknown
+    const badge = document.getElementById('tpp-badge')
+    badge.textContent = nodeType
+    badge.style.background = b.bg
+    badge.style.color = b.color
+    document.getElementById('tpp-title').textContent = data.meta?.title || pageId.split('/').pop()
+    document.getElementById('tpp-content').innerHTML = data.html
+    document.querySelectorAll('#tpp-content a[href^="wiki:"]').forEach(a => {
+      a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openTagsPagePanel(a.getAttribute('href').slice(5)) })
+    })
+  } catch {}
+}
+
+async function setupTags() {
+  document.getElementById('tpp-close').addEventListener('click', () => {
+    document.getElementById('tags-page-panel').classList.remove('open')
+  })
+
+  document.getElementById('tags-main').addEventListener('click', e => {
+    const panel = document.getElementById('tags-page-panel')
+    if (panel.classList.contains('open') && !panel.contains(e.target)) {
+      panel.classList.remove('open')
+    }
+  })
+
+  let allTags = []
+  try {
+    const res = await fetch('/api/tags').then(r => r.json())
+    allTags = res.tags
+  } catch { return }
+
+  const listEl = document.getElementById('tags-list')
+
+  function renderTagList(filter = '') {
+    listEl.innerHTML = ''
+    const filtered = filter ? allTags.filter(({ tag }) => tag.toLowerCase().includes(filter)) : allTags
+    for (const { tag, count } of filtered) {
+      const item = document.createElement('div')
+      item.className = 'tags-list-item'
+      item.innerHTML = `
+        <span class="tags-list-name">${tag}</span>
+        <span class="tags-list-actions">
+          <button class="tags-list-action rename" title="重命名">✎</button>
+          <button class="tags-list-action delete" title="删除">✕</button>
+        </span>
+        <span class="tags-list-count">${count}</span>
+      `
+      item.querySelector('.tags-list-name').addEventListener('click', () => selectTag(tag, item))
+      item.querySelector('.tags-list-count').addEventListener('click', () => selectTag(tag, item))
+
+      item.querySelector('.rename').addEventListener('click', e => {
+        e.stopPropagation()
+        startRename(item, tag)
+      })
+
+      item.querySelector('.delete').addEventListener('click', async e => {
+        e.stopPropagation()
+        if (!confirm(`删除标签「${tag}」？将从 ${count} 个页面中移除。`)) return
+        await fetch(`/api/tags/${encodeURIComponent(tag)}`, { method: 'DELETE' })
+        allTags = allTags.filter(t => t.tag !== tag)
+        allNodes.forEach(n => { if (n.tags) n.tags = n.tags.filter(t => t !== tag) })
+        renderTagList(document.getElementById('tags-sidebar-search').value.toLowerCase().trim())
+      })
+
+      listEl.appendChild(item)
+    }
+  }
+
+  function startRename(item, oldTag) {
+    const nameEl = item.querySelector('.tags-list-name')
+    const countEl = item.querySelector('.tags-list-count')
+    const actionsEl = item.querySelector('.tags-list-actions')
+    nameEl.style.display = 'none'
+    countEl.style.display = 'none'
+    actionsEl.style.display = 'none'
+
+    const input = document.createElement('input')
+    input.className = 'tags-list-rename'
+    input.value = oldTag
+    item.insertBefore(input, nameEl)
+    input.focus()
+    input.select()
+
+    async function commitRename() {
+      const newTag = input.value.trim()
+      input.remove()
+      nameEl.style.display = ''
+      countEl.style.display = ''
+      actionsEl.style.display = ''
+      if (!newTag || newTag === oldTag) return
+      await fetch(`/api/tags/${encodeURIComponent(oldTag)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newTag })
+      })
+      allTags = allTags.map(t => t.tag === oldTag ? { ...t, tag: newTag } : t)
+      allNodes.forEach(n => {
+        if (n.tags) n.tags = n.tags.map(t => t === oldTag ? newTag : t)
+      })
+      renderTagList(document.getElementById('tags-sidebar-search').value.toLowerCase().trim())
+    }
+
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.isComposing) commitRename()
+      if (e.key === 'Escape') {
+        input.remove()
+        nameEl.style.display = ''
+        countEl.style.display = ''
+        actionsEl.style.display = ''
+      }
+    })
+    input.addEventListener('blur', commitRename)
+  }
+
+  function selectTag(tag, itemEl) {
+    document.querySelectorAll('.tags-list-item').forEach(i => i.classList.remove('active'))
+    itemEl.classList.add('active')
+    document.getElementById('tags-page-panel').classList.remove('open')
+
+    const pages = allNodes.filter(n => (n.tags || []).map(String).includes(tag))
+    const welcome = document.getElementById('tags-welcome')
+    const pagesEl = document.getElementById('tags-pages')
+
+    welcome.style.display = 'none'
+    pagesEl.style.display = 'flex'
+    pagesEl.innerHTML = `<div id="tags-pages-header">${tag} · ${pages.length} 个页面</div>`
+
+    for (const node of pages.sort((a, b) => a.title.localeCompare(b.title))) {
+      const b = BADGE[node.type] || BADGE.unknown
+      const card = document.createElement('div')
+      card.className = 'tag-page-card'
+      const otherTags = (node.tags || []).filter(t => t !== tag).slice(0, 3)
+      card.innerHTML = `
+        <span class="tag-page-card-badge" style="background:${b.bg};color:${b.color}">${node.type || 'unknown'}</span>
+        <span class="tag-page-card-title">${node.title}</span>
+        <span class="tag-page-card-tags">${otherTags.map(t => `<span class="tag-page-card-tag">${t}</span>`).join('')}</span>
+      `
+      card.addEventListener('click', e => { e.stopPropagation(); openTagsPagePanel(node.id) })
+      pagesEl.appendChild(card)
+    }
+  }
+
+  renderTagList()
+
+  document.getElementById('tags-sidebar-search').addEventListener('input', e => {
+    renderTagList(e.target.value.toLowerCase().trim())
+  })
+}
+
 // ── Ingest View ──────────────────────────────────────────────────────────────
 
 function setupIngest() {
   const dropZone = document.getElementById('drop-zone')
   const fileInput = document.getElementById('file-input')
   let selectedFiles = []
+  let ingestTags = []
 
+  // ── Tag input ──────────────────────────────────────────────────────────────
+  const tagsWrap = document.getElementById('tags-chips-wrap')
+  const tagsInput = document.getElementById('tags-input')
+
+  function addTag(raw) {
+    const tag = raw.trim().replace(/,+$/, '').trim()
+    if (!tag || ingestTags.includes(tag)) return
+    ingestTags.push(tag)
+    renderTags()
+  }
+
+  function removeTag(tag) {
+    ingestTags = ingestTags.filter(t => t !== tag)
+    renderTags()
+  }
+
+  function renderTags() {
+    const chips = document.getElementById('tags-chips')
+    chips.innerHTML = ingestTags.map(t => `
+      <span class="tag-chip">
+        ${t}
+        <button class="tag-chip-remove" data-tag="${t}">✕</button>
+      </span>
+    `).join('')
+    chips.querySelectorAll('.tag-chip-remove').forEach(b => {
+      b.addEventListener('click', e => { e.stopPropagation(); removeTag(b.dataset.tag) })
+    })
+  }
+
+  tagsInput.addEventListener('keydown', e => {
+    if ((e.key === 'Enter' || e.key === ',') && !e.isComposing) {
+      e.preventDefault()
+      addTag(tagsInput.value)
+      tagsInput.value = ''
+    } else if (e.key === 'Backspace' && tagsInput.value === '' && ingestTags.length) {
+      removeTag(ingestTags[ingestTags.length - 1])
+    }
+  })
+
+  tagsInput.addEventListener('blur', () => {
+    if (tagsInput.value.trim()) { addTag(tagsInput.value); tagsInput.value = '' }
+  })
+
+  tagsWrap.addEventListener('click', () => tagsInput.focus())
+
+  // ── File drop ──────────────────────────────────────────────────────────────
   dropZone.addEventListener('click', e => { if (!e.target.closest('label')) fileInput.click() })
   dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over') })
   dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'))
@@ -755,9 +1028,12 @@ function setupIngest() {
   document.getElementById('ingest-file-btn').addEventListener('click', () => {
     if (!selectedFiles.length) return
     const toUpload = [...selectedFiles]
+    const tagsSnapshot = [...ingestTags]
     selectedFiles = []
+    ingestTags = []
     renderFileList()
-    runUpload(toUpload)
+    renderTags()
+    runUpload(toUpload, tagsSnapshot)
   })
 
   document.getElementById('run-now-btn').addEventListener('click', async () => {
@@ -771,7 +1047,7 @@ function setupIngest() {
   loadIngestStatus()
 }
 
-async function runUpload(files) {
+async function runUpload(files, tags = []) {
   const btn = document.getElementById('ingest-file-btn')
   btn.disabled = true
 
@@ -783,6 +1059,7 @@ async function runUpload(files) {
 
   const fd = new FormData()
   files.forEach(f => fd.append('files', f))
+  if (tags.length) fd.append('tags', JSON.stringify(tags))
 
   try {
     const res = await fetch('/api/upload', { method: 'POST', body: fd }).then(r => r.json())
@@ -851,8 +1128,49 @@ async function pollIngestStatus() {
 
 // ── Lint View ─────────────────────────────────────────────────────────────────
 
+async function loadLintSchedulerStatus() {
+  const info = document.getElementById('lint-sched-info')
+  try {
+    const s = await fetch('/api/lint/status').then(r => r.json())
+    document.getElementById('lint-sched-enabled').checked = s.enabled
+    document.getElementById('lint-cron-input').value = s.schedule
+    const lastRun = s.lastRun
+      ? new Date(s.lastRun).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+      : null
+    info.innerHTML = `
+      <div class="sched-row">
+        <span class="sched-dot ${s.running ? 'running' : s.enabled ? 'on' : 'off'}"></span>
+        <span>${s.running ? '检查中' : s.enabled ? '已启用' : '已禁用'}</span>
+        <span class="sched-cron">${s.schedule}</span>
+      </div>
+      ${lastRun && s.lastResult ? `<div class="sched-last">上次 ${lastRun} · ${s.lastResult}</div>` : ''}
+    `
+  } catch {
+    info.innerHTML = `<span class="sched-offline">状态不可用</span>`
+  }
+}
+
 function setupLint() {
   document.getElementById('lint-btn').addEventListener('click', runLint)
+  loadLintSchedulerStatus()
+
+  document.getElementById('lint-sched-enabled').addEventListener('change', async e => {
+    await fetch('/api/lint/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: e.target.checked })
+    })
+    loadLintSchedulerStatus()
+  })
+
+  document.getElementById('lint-cron-save').addEventListener('click', async () => {
+    const schedule = document.getElementById('lint-cron-input').value.trim()
+    if (!schedule) return
+    await fetch('/api/lint/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ schedule })
+    })
+    loadLintSchedulerStatus()
+  })
 }
 
 async function runLint() {
@@ -925,18 +1243,18 @@ async function runLint() {
   btn.disabled = false
   btn.textContent = '重新检查'
 
-  // show fix button if there are errors or warnings (both are fixable)
-  if (errors > 0 || warnings > 0) {
+  // show fix button only when there are errors (warnings are informational only)
+  if (errors > 0) {
     let fixBtn = document.getElementById('lint-fix-btn')
     if (!fixBtn) {
       fixBtn = document.createElement('button')
       fixBtn.id = 'lint-fix-btn'
       fixBtn.className = 'lint-fix-btn'
-      fixBtn.textContent = `自动修复断链 + 孤岛 (${errors + warnings} 项)`
+      fixBtn.textContent = `自动修复断链 + 孤岛 (${errors} 项)`
       document.getElementById('lint-header').appendChild(fixBtn)
       fixBtn.addEventListener('click', runLintFix)
     } else {
-      fixBtn.textContent = `自动修复断链 + 孤岛 (${errors + warnings} 项)`
+      fixBtn.textContent = `自动修复断链 + 孤岛 (${errors} 项)`
       fixBtn.style.display = ''
     }
   } else {

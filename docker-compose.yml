@@ -1,0 +1,10 @@
+services:
+  wiki:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./wiki:/app/wiki
+    restart: unless-stopped

@@ -30,8 +30,15 @@ try {
 
 const app = express()
 const WIKI_PATH = process.env.WIKI_PATH || path.join(process.cwd(), 'wiki', 'wiki')
-const INGEST_LANG = process.env.INGEST_LANG || 'zh'
-const QUERY_LANG  = process.env.QUERY_LANG  || 'zh'
+const INGEST_LANG        = process.env.INGEST_LANG         || 'zh'
+const INGEST_MAX_CHARS   = parseInt(process.env.INGEST_MAX_CHARS   || '50000', 10)
+const INGEST_MAX_TOKENS  = parseInt(process.env.INGEST_MAX_TOKENS  || '8192',  10)
+const INGEST_INDEX_CHARS = parseInt(process.env.INGEST_INDEX_CHARS || '3000',  10)
+const QUERY_LANG        = process.env.QUERY_LANG         || 'zh'
+const QUERY_TOP_K       = parseInt(process.env.QUERY_TOP_K       || '10', 10)
+const QUERY_PAGE_CHARS  = parseInt(process.env.QUERY_PAGE_CHARS  || '8000', 10)
+const QUERY_MIN_SCORE   = parseFloat(process.env.QUERY_MIN_SCORE || '0')
+const QUERY_MAX_TOKENS  = parseInt(process.env.QUERY_MAX_TOKENS  || '2048', 10)
 const QUERY_LANG_INSTRUCTION = {
   zh:        '回答用中文，结构清晰。',
   en:        'Answer in English, with clear structure.',
@@ -49,6 +56,22 @@ function safeMatter(raw) {
     const stripped = raw.replace(/^---[\s\S]*?---\n?/, '')
     return { data: {}, content: stripped }
   }
+}
+
+// Merge user-supplied tags into a wiki page's frontmatter without overwriting LLM-generated tags.
+function mergeUserTags(filePath, userTags) {
+  if (!userTags || !userTags.length) return
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8')
+    const parsed = safeMatter(raw)
+    const existing = Array.isArray(parsed.data.tags)
+      ? parsed.data.tags.map(String)
+      : (parsed.data.tags ? [String(parsed.data.tags)] : [])
+    const merged = [...new Set([...existing, ...userTags])]
+    if (merged.length === existing.length && userTags.every(t => existing.includes(t))) return
+    parsed.data.tags = merged
+    fs.writeFileSync(filePath, matter.stringify(parsed.content, parsed.data))
+  } catch {}
 }
 
 // After LLM writes a file, re-serialize the sources field so special chars are safe YAML.
@@ -229,6 +252,64 @@ function buildGraph() {
   return { nodes, edges }
 }
 
+app.get('/api/tags', (req, res) => {
+  const counts = {}
+  try {
+    for (const file of globSync('**/*.md', { cwd: WIKI_PATH })) {
+      const { data } = safeMatter(fs.readFileSync(path.join(WIKI_PATH, file), 'utf8'))
+      const tags = Array.isArray(data.tags) ? data.tags : (data.tags ? [data.tags] : [])
+      tags.forEach(t => { if (t) counts[String(t)] = (counts[String(t)] || 0) + 1 })
+    }
+  } catch (e) {
+    return res.status(500).json({ error: e.message })
+  }
+  const tags = Object.entries(counts)
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))
+  res.json({ tags })
+})
+
+function updateTagInFiles(oldTag, newTag) {
+  const updated = []
+  for (const file of globSync('**/*.md', { cwd: WIKI_PATH })) {
+    const filePath = path.join(WIKI_PATH, file)
+    const raw = fs.readFileSync(filePath, 'utf8')
+    const parsed = safeMatter(raw)
+    const tags = Array.isArray(parsed.data.tags)
+      ? parsed.data.tags.map(String)
+      : (parsed.data.tags ? [String(parsed.data.tags)] : [])
+    if (!tags.includes(oldTag)) continue
+    parsed.data.tags = newTag
+      ? tags.map(t => t === oldTag ? newTag : t)
+      : tags.filter(t => t !== oldTag)
+    try {
+      fs.writeFileSync(filePath, matter.stringify(parsed.content, parsed.data))
+      updated.push(file)
+    } catch {}
+  }
+  return updated
+}
+
+app.delete('/api/tags/:tag', (req, res) => {
+  try {
+    const updated = updateTagInFiles(req.params.tag, null)
+    res.json({ ok: true, updated: updated.length })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.put('/api/tags/:tag', express.json(), (req, res) => {
+  const { newTag } = req.body
+  if (!newTag || !newTag.trim()) return res.status(400).json({ error: 'newTag required' })
+  try {
+    const updated = updateTagInFiles(req.params.tag, newTag.trim())
+    res.json({ ok: true, updated: updated.length })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 app.get('/api/graph', (req, res) => {
   res.setHeader('Cache-Control', 'no-store')
   try {
@@ -302,6 +383,18 @@ function normalizeQuotes(s) {
   return s.replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
 }
 
+function getExistingTags() {
+  const tags = new Set()
+  try {
+    for (const file of globSync('**/*.md', { cwd: WIKI_PATH })) {
+      const { data } = safeMatter(fs.readFileSync(path.join(WIKI_PATH, file), 'utf8'))
+      const t = Array.isArray(data.tags) ? data.tags : (data.tags ? [data.tags] : [])
+      t.forEach(tag => { if (tag) tags.add(String(tag)) })
+    }
+  } catch {}
+  return [...tags].sort()
+}
+
 function getProcessedIngestFiles() {
   const processed = new Set()
   try {
@@ -347,14 +440,25 @@ const schedulerState = {
   cronJob: null
 }
 
-async function processContent(content, sourceName, rawFileName, send) {
+const lintSchedulerState = {
+  enabled: process.env.LINT_ENABLED === 'true',
+  schedule: process.env.LINT_CRON || '0 0 * * *',
+  running: false,
+  lastRun: null,
+  lastResult: null,
+  cronJob: null
+}
+
+async function processContent(content, sourceName, rawFileName, send, userTags = []) {
   const today = new Date().toISOString().split('T')[0]
   send('log', `🤖 Claude 正在分析…`)
 
   let existingIndex = ''
   try {
-    existingIndex = fs.readFileSync(path.join(WIKI_PATH, 'index.md'), 'utf8').slice(0, 3000)
+    existingIndex = fs.readFileSync(path.join(WIKI_PATH, 'index.md'), 'utf8').slice(0, INGEST_INDEX_CHARS)
   } catch {}
+
+  const existingTags = getExistingTags()
 
   const systemPrompt = `你是 Karpathy LLM Wiki 知识库构建助手。分析内容，生成结构化 Wiki 页面。
 使用以下分隔符格式输出（不要用 JSON）：
@@ -375,10 +479,10 @@ async function processContent(content, sourceName, rawFileName, send) {
 - [[源名]] — 一行描述
 
 规则：
-- Frontmatter 必须包含: title, type, tags, created(${today}), updated(${today}), sources(["raw/${rawFileName}"])
+- Frontmatter 必须包含: title, type, tags, created(${today}), updated(${today}), sources(["raw/${rawFileName}"])${existingTags.length ? `\n- tags 字段优先复用知识库已有标签，避免同义词重复（已有标签: ${existingTags.join(', ')}）；内容确实涉及新概念时才创建新标签` : ''}
 - 交叉引用：在新页面内容中，用 [[wikilinks]] 链接到下方已有知识库页面中相关的条目，使新节点融入知识图谱
 - 只创建有实质内容的页面
-- ${{ zh: '所有页面内容（标题、正文、描述）一律用中文', en: 'All page content (titles, body, descriptions) must be in English', auto: '内容语言跟随原文语言' }[INGEST_LANG] || '内容语言跟随原文语言'}
+- ${{ zh: '所有页面内容（标题、正文、描述）一律用中文', en: 'All page content (titles, body, descriptions) must be in English', auto: '内容语言跟随原文语言' }[INGEST_LANG] || '内容语言跟随原文语言'}${userTags.length ? `\n- 每个页面的 tags 字段必须包含以下用户指定标签: ${userTags.join(', ')}` : ''}
 - 每个 ===FILE:=== 块之间不要有额外分隔符
 - 严禁将文件内容包裹在 \`\`\`markdown 或任何代码块中，直接输出原始 Markdown 文本（frontmatter 的 --- 必须是文件的第一行）
 
@@ -387,7 +491,7 @@ ${existingIndex}`
 
   let fullText = ''
   let charsSinceUpdate = 0
-  for await (const text of streamLLM(systemPrompt, `来源: ${sourceName}\n\n${content.slice(0, 50000)}`, 8192)) {
+  for await (const text of streamLLM(systemPrompt, `来源: ${sourceName}\n\n${content.slice(0, INGEST_MAX_CHARS)}`, INGEST_MAX_TOKENS)) {
     fullText += text
     charsSinceUpdate += text.length
     if (charsSinceUpdate >= 300) {
@@ -415,6 +519,7 @@ ${existingIndex}`
     const existed = fs.existsSync(fullFilePath)
     fs.writeFileSync(fullFilePath, fileContent)
     fixSourcesField(fullFilePath, rawFileName)
+    mergeUserTags(fullFilePath, userTags)
     created.push(relPath)
     send(existed ? 'updated' : 'created', relPath)
   }
@@ -429,7 +534,9 @@ ${existingIndex}`
 
   const allEntries = Object.entries(indexEntries)
   if (allEntries.length > 0) {
-    let idx = fs.readFileSync(path.join(WIKI_PATH, 'index.md'), 'utf8')
+    const indexFilePath = path.join(WIKI_PATH, 'index.md')
+    if (!fs.existsSync(indexFilePath)) fs.writeFileSync(indexFilePath, '# Index\n')
+    let idx = fs.readFileSync(indexFilePath, 'utf8')
     for (const [section, lines] of allEntries) {
       const header = `## ${section}`
       const pos = idx.indexOf(header)
@@ -473,8 +580,12 @@ async function runScheduledIngest() {
       slog('section', `处理: ${filename}`)
       const content = fs.readFileSync(path.join(RAW_PATH, filename), 'utf8')
       const name = path.basename(filename, path.extname(filename))
-      const count = await processContent(content, name, filename, slog)
+      let userTags = []
+      const sidecarPath = path.join(RAW_PATH, filename + '.tags.json')
+      try { userTags = JSON.parse(fs.readFileSync(sidecarPath, 'utf8')) } catch {}
+      const count = await processContent(content, name, filename, slog, userTags)
       total += count
+      try { if (userTags.length) fs.unlinkSync(sidecarPath) } catch {}
     }
     schedulerState.lastResult = `✅ ${pending.length} 个文件，${total} 个页面`
     slog('done', schedulerState.lastResult)
@@ -498,9 +609,14 @@ initScheduler()
 app.post('/api/upload', upload.array('files', 20), (req, res) => {
   if (!fs.existsSync(RAW_INGEST_PATH)) fs.mkdirSync(RAW_INGEST_PATH, { recursive: true })
   const uploaded = []
+  let userTags = []
+  try { userTags = JSON.parse(req.body.tags || '[]') } catch {}
   for (const file of (req.files || [])) {
     const name = Buffer.from(file.originalname, 'latin1').toString('utf8')
     fs.writeFileSync(path.join(RAW_INGEST_PATH, name), file.buffer)
+    if (userTags.length) {
+      fs.writeFileSync(path.join(RAW_INGEST_PATH, name + '.tags.json'), JSON.stringify(userTags))
+    }
     uploaded.push({ filename: name, size: file.size })
   }
   res.json({ uploaded })
@@ -532,6 +648,94 @@ app.post('/api/ingest/run-now', (req, res) => {
   res.json({ ok: true })
 })
 
+// ── Lint Scheduler ────────────────────────────────────────────────────────────
+
+async function runScheduledLint() {
+  if (lintSchedulerState.running) return
+  lintSchedulerState.running = true
+  lintSchedulerState.lastRun = new Date().toISOString()
+  try {
+    const files = globSync('**/*.md', { cwd: WIKI_PATH })
+    const titleMap = buildTitleMap(files, WIKI_PATH)
+    const pageData = {}
+    for (const file of files) {
+      const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
+      const { data, content } = safeMatter(raw)
+      const id = file.replace(/\.md$/, '')
+      pageData[id] = { file, content, data }
+    }
+    let errors = 0, warnings = 0
+
+    // broken links
+    for (const [, page] of Object.entries(pageData)) {
+      const links = [...page.content.matchAll(/\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/g)]
+      for (const m of links) { if (!resolveLink(m[1].trim(), titleMap)) errors++ }
+    }
+    // duplicate frontmatter keys
+    for (const [, page] of Object.entries(pageData)) {
+      const raw = fs.readFileSync(path.join(WIKI_PATH, page.file), 'utf8')
+      if (findDuplicateFMKeys(raw).length) errors++
+    }
+    // missing required frontmatter
+    const REQUIRED = ['title', 'type', 'tags', 'created']
+    const skip = new Set(['index', 'overview'])
+    for (const [id, page] of Object.entries(pageData)) {
+      if (skip.has(path.basename(id))) continue
+      if (REQUIRED.some(f => !page.data[f])) warnings++
+    }
+    // orphan pages
+    const { components } = buildComponents(pageData, titleMap)
+    const navIds = new Set(['index', 'overview'])
+    for (const component of components.slice(1)) {
+      for (const id of component) { if (!navIds.has(id)) warnings++ }
+    }
+
+    let fixedCount = 0
+    if (errors > 0) {
+      const { fixes } = fixErrors()
+      fixedCount = fixes.length
+    }
+    const summary = `${errors} 个错误 · ${warnings} 个警告${fixedCount ? ` · 已修复 ${fixedCount} 项` : ''}`
+    lintSchedulerState.lastResult = summary
+    fs.appendFileSync(logPath, `\n## [${lintSchedulerState.lastRun}] lint | ${summary}\n`)
+  } catch (e) {
+    lintSchedulerState.lastResult = `❌ ${e.message}`
+  }
+  lintSchedulerState.running = false
+}
+
+function initLintScheduler() {
+  if (lintSchedulerState.cronJob) lintSchedulerState.cronJob.destroy()
+  if (lintSchedulerState.enabled) {
+    lintSchedulerState.cronJob = cron.schedule(lintSchedulerState.schedule, runScheduledLint)
+  }
+}
+initLintScheduler()
+
+app.get('/api/lint/status', (req, res) => {
+  res.json({
+    enabled: lintSchedulerState.enabled,
+    schedule: lintSchedulerState.schedule,
+    running: lintSchedulerState.running,
+    lastRun: lintSchedulerState.lastRun,
+    lastResult: lintSchedulerState.lastResult
+  })
+})
+
+app.post('/api/lint/config', express.json(), (req, res) => {
+  const { enabled, schedule } = req.body
+  if (typeof enabled === 'boolean') lintSchedulerState.enabled = enabled
+  if (schedule && cron.validate(schedule)) lintSchedulerState.schedule = schedule
+  initLintScheduler()
+  res.json({ ok: true, enabled: lintSchedulerState.enabled, schedule: lintSchedulerState.schedule })
+})
+
+app.post('/api/lint/run-now', (req, res) => {
+  if (lintSchedulerState.running) return res.json({ ok: false, reason: 'already running' })
+  runScheduledLint()
+  res.json({ ok: true })
+})
+
 app.post('/api/ingest', upload.array('files', 20), async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream')
   res.setHeader('Cache-Control', 'no-cache')
@@ -540,6 +744,9 @@ app.post('/api/ingest', upload.array('files', 20), async (req, res) => {
   const send = (type, msg) => res.write(`data: ${JSON.stringify({ type, msg })}\n\n`)
 
   if (!fs.existsSync(RAW_INGEST_PATH)) fs.mkdirSync(RAW_INGEST_PATH, { recursive: true })
+
+  let userTags = []
+  try { userTags = JSON.parse(req.body.tags || '[]') } catch {}
 
   try {
     if (req.files && req.files.length > 0) {
@@ -551,7 +758,7 @@ app.post('/api/ingest', upload.array('files', 20), async (req, res) => {
         fs.writeFileSync(path.join(RAW_INGEST_PATH, originalname), file.buffer)
         const content = file.buffer.toString('utf8')
         const name = path.basename(originalname, path.extname(originalname))
-        const count = await processContent(content, name, `ingest/${originalname}`, send)
+        const count = await processContent(content, name, `ingest/${originalname}`, send, userTags)
         total += count
       }
       send('done', `✅ 完成！共创建/更新 ${total} 个页面`)
@@ -614,6 +821,16 @@ app.get('/api/lint', (req, res) => {
   }
   send('check', `Frontmatter 检查完成`)
 
+  // 2b. duplicate frontmatter keys
+  for (const [, page] of Object.entries(pageData)) {
+    const raw = fs.readFileSync(path.join(WIKI_PATH, page.file), 'utf8')
+    const dupes = findDuplicateFMKeys(raw)
+    if (dupes.length) {
+      errors++
+      send('error', `重复的 Frontmatter 字段 [${dupes.join(', ')}] ← ${page.file}`)
+    }
+  }
+
   // 3. orphan pages — connected component analysis (undirected graph)
   // A cluster that only links within itself is just as broken as a lone orphan
   send('section', '检查孤岛页面')
@@ -651,6 +868,47 @@ app.get('/api/lint', (req, res) => {
   }
   send('check', `Ghost 文件检查完成`)
 
+  // 5. tag checks
+  send('section', '检查标签')
+  const tagFreqMap = {}
+  for (const [, page] of Object.entries(pageData)) {
+    const tags = Array.isArray(page.data.tags) ? page.data.tags : []
+    const strTags = tags.map(t => String(t).trim())
+    if (tags.length > 0 && strTags.some(t => t.length === 0)) {
+      warnings++
+      send('warning', `${page.file} 含空标签条目`)
+    }
+    for (const t of strTags.filter(t => t.length > 0)) {
+      if (!tagFreqMap[t]) tagFreqMap[t] = []
+      tagFreqMap[t].push(page.file)
+    }
+  }
+
+  // singleton tags
+  for (const [tag, pages] of Object.entries(tagFreqMap)) {
+    if (pages.length === 1) {
+      warnings++
+      send('warning', `单次出现的标签 "${tag}" ← ${pages[0]}`)
+    }
+  }
+
+  // case-variant duplicates
+  const lcVariants = {}
+  for (const tag of Object.keys(tagFreqMap)) {
+    const lc = tag.toLowerCase()
+    if (!lcVariants[lc]) lcVariants[lc] = []
+    lcVariants[lc].push(tag)
+  }
+  for (const [, variants] of Object.entries(lcVariants)) {
+    if (variants.length > 1) {
+      warnings++
+      send('warning', `大小写变体标签: ${variants.join(' / ')}`)
+    }
+  }
+
+
+  send('check', `标签检查完成 (共 ${Object.keys(tagFreqMap).length} 个标签)`)
+
   send('done', `${errors} 个错误 · ${warnings} 个警告`)
   res.end()
 })
@@ -669,6 +927,53 @@ function buildPageData() {
   return { files, titleMap, pageData }
 }
 
+// Detect duplicate top-level YAML keys in frontmatter
+function findDuplicateFMKeys(rawText) {
+  const m = rawText.match(/^---\n([\s\S]*?)\n---/)
+  if (!m) return []
+  const seen = [], dupes = new Set()
+  for (const line of m[1].split('\n')) {
+    const km = line.match(/^([a-zA-Z_][\w-]*):/)
+    if (km) { if (seen.includes(km[1])) dupes.add(km[1]); else seen.push(km[1]) }
+  }
+  return [...dupes]
+}
+
+// Merge duplicate frontmatter keys: list values are unioned, scalars keep last
+function mergeDuplicateFMKeys(filePath) {
+  const raw = fs.readFileSync(filePath, 'utf8')
+  const dupes = findDuplicateFMKeys(raw)
+  if (dupes.length === 0) return false
+  const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/)
+  if (!fmMatch) return false
+
+  // Walk raw YAML lines and collect all values for each duplicate key
+  const collected = {}
+  for (const key of dupes) collected[key] = new Set()
+  let currentKey = null
+  for (const line of fmMatch[1].split('\n')) {
+    const km = line.match(/^([a-zA-Z_][\w-]*):\s*(.*)/)
+    if (km) {
+      currentKey = km[1]
+      const inline = km[2].trim().replace(/^["']|["']$/g, '')
+      if (dupes.includes(currentKey) && inline) collected[currentKey].add(inline)
+    } else if (currentKey && dupes.includes(currentKey) && /^\s+-\s+/.test(line)) {
+      const val = line.replace(/^\s+-\s+/, '').replace(/^["']|["']$/g, '').trim()
+      if (val) collected[currentKey].add(val)
+    }
+  }
+  // gray-matter keeps last-occurrence value; union with collected
+  const { data, content } = safeMatter(raw)
+  for (const key of dupes) {
+    const existing = Array.isArray(data[key]) ? data[key] : (data[key] ? [String(data[key])] : [])
+    existing.forEach(v => collected[key].add(String(v)))
+    if (collected[key].size > 0) data[key] = [...collected[key]]
+  }
+  fs.writeFileSync(filePath, matter.stringify(content, data))
+  fixSourcesField(filePath)
+  return true
+}
+
 // word-overlap score between two text blobs (Chinese-aware)
 function overlapScore(a, b) {
   const tokens = a.toLowerCase().split(/[\s，。！？,.!?、:：；;]+/).filter(w => w.length > 1)
@@ -677,18 +982,27 @@ function overlapScore(a, b) {
 }
 
 // Lint Fix: fix broken links (aliases) + orphan pages (See Also links)
-app.post('/api/lint/fix', (req, res) => {
-  const { files, titleMap, pageData } = buildPageData()
-  const navIds = new Set(['index', 'overview'])
+// Fix error-level issues only: duplicate FM keys + broken wikilinks
+function fixErrors() {
+  let { files, titleMap, pageData } = buildPageData()
   const fixes = []
 
-  // ── 1. Fix broken wikilinks by adding aliases ────────────────────────────
+  // 0. Duplicate frontmatter keys
+  for (const file of files) {
+    if (mergeDuplicateFMKeys(path.join(WIKI_PATH, file)))
+      fixes.push({ type: 'fm-dedup', detail: `合并重复 Frontmatter 键 ← ${file}` })
+  }
+  // Rebuild after frontmatter fixes so link resolution uses fresh aliases
+  const rebuilt = buildPageData()
+  files = rebuilt.files; Object.assign(titleMap, rebuilt.titleMap); Object.assign(pageData, rebuilt.pageData)
+
+  // 1. Broken wikilinks → add alias to best-matching page
   const alreadyFixed = new Set()
   for (const [, page] of Object.entries(pageData)) {
     const links = [...page.content.matchAll(/\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/g)]
     for (const m of links) {
       const text = m[1].trim()
-      if (resolveLink(text, titleMap)) continue  // already resolves
+      if (resolveLink(text, titleMap)) continue
       const key = text.toLowerCase()
       if (alreadyFixed.has(key)) continue
       const noParens = normText(text)
@@ -716,14 +1030,17 @@ app.post('/api/lint/fix', (req, res) => {
       }
     }
   }
+  return { fixes, files, titleMap, pageData }
+}
 
-  // ── 2. Fix isolated components by adding one bridge edge per cluster ────────
-  // Detect components on the (potentially alias-fixed) pageData
+app.post('/api/lint/fix', (req, res) => {
+  const { fixes, titleMap, pageData } = fixErrors()
+  const navIds = new Set(['index', 'overview'])
+
+  // ── Also fix isolated components (warning, but included in manual fix) ──
   const { components: comps } = buildComponents(pageData, titleMap)
   const mainSet = new Set(comps[0] || [])
-
   for (const component of comps.slice(1)) {
-    // pick the node with the most internal edges as representative
     const { adj: adjComp } = buildComponents(
       Object.fromEntries(component.map(id => [id, pageData[id]])), titleMap
     )
@@ -731,8 +1048,6 @@ app.post('/api/lint/fix', (req, res) => {
       (adjComp[id]?.size || 0) > (adjComp[best]?.size || 0) ? id : best, component[0])
     const repPage = pageData[rep]
     if (!repPage) continue
-
-    // find best matching main-graph content page by word overlap
     const repText = repPage.title + ' ' + repPage.content
     let bestId = null, bestScore = 0
     for (const mainId of mainSet) {
@@ -742,16 +1057,12 @@ app.post('/api/lint/fix', (req, res) => {
       const score = overlapScore(repText, mp.title + ' ' + mp.content)
       if (score > bestScore) { bestScore = score; bestId = mainId }
     }
-
-    // if no overlap found, just pick the first non-nav main page
     if (!bestId) bestId = [...mainSet].find(id => !navIds.has(id) && !id.startsWith('sources/'))
     if (!bestId) continue
-
     const linkStr = `[[${repPage.title}]]`
     const targetPath = path.join(WIKI_PATH, pageData[bestId].file)
     let targetContent = fs.readFileSync(targetPath, 'utf8')
     if (targetContent.includes(linkStr)) continue
-
     if (targetContent.includes('\n## See Also\n')) {
       targetContent = targetContent.replace('\n## See Also\n', `\n## See Also\n- ${linkStr}\n`)
     } else {
@@ -800,16 +1111,17 @@ async function queryWiki(question) {
   const pages = files.map(file => {
     const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
     const { data, content } = safeMatter(raw)
-    return { file, title: data.title != null ? String(data.title) : file, content }
+    const tags = Array.isArray(data.tags) ? data.tags.join(' ') : (data.tags || '')
+    return { file, title: data.title != null ? String(data.title) : file, tags, content }
   })
   const scored = pages.map(p => ({
     ...p,
-    score: scoreRelevance(question, p.title + ' ' + p.content)
+    score: scoreRelevance(question, p.title + ' ' + p.tags + ' ' + p.content)
   })).sort((a, b) => b.score - a.score)
-  const top = scored.slice(0, 10).filter(p => p.score > 0)
+  const top = scored.slice(0, QUERY_TOP_K).filter(p => p.score > QUERY_MIN_SCORE)
   const sources = top.map(p => p.file)
   const context = top.map(p =>
-    `## ${p.title} [${p.file}]\n${p.content.slice(0, 4000)}`
+    `## ${p.title} [${p.file}]\n${p.content.slice(0, QUERY_PAGE_CHARS)}`
   ).join('\n\n---\n\n')
   const sysPrompt = `你是一个个人知识库助手。以下是知识库中与问题最相关的页面（按相关度排序）。
 请优先基于这些页面内容回答，尤其是页面中与问题直接相关的具体内容、观点和建议。
@@ -819,7 +1131,7 @@ ${QUERY_LANG_INSTRUCTION}
 
 ${context}`
   let answer = ''
-  for await (const text of streamLLM(sysPrompt, question, 2048)) answer += text
+  for await (const text of streamLLM(sysPrompt, question, QUERY_MAX_TOKENS)) answer += text
   return { answer, sources }
 }
 
@@ -831,16 +1143,17 @@ app.post('/api/query', express.json(), async (req, res) => {
   const pages = files.map(file => {
     const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
     const { data, content } = safeMatter(raw)
-    return { file, title: data.title != null ? String(data.title) : file, content }
+    const tags = Array.isArray(data.tags) ? data.tags.join(' ') : (data.tags || '')
+    return { file, title: data.title != null ? String(data.title) : file, tags, content }
   })
   const scored = pages.map(p => ({
     ...p,
-    score: scoreRelevance(question, p.title + ' ' + p.content)
+    score: scoreRelevance(question, p.title + ' ' + p.tags + ' ' + p.content)
   })).sort((a, b) => b.score - a.score)
-  const top = scored.slice(0, 10).filter(p => p.score > 0)
+  const top = scored.slice(0, QUERY_TOP_K).filter(p => p.score > QUERY_MIN_SCORE)
   const selected = top.map(p => p.file)
   const context = top.map(p =>
-    `## ${p.title} [${p.file}]\n${p.content.slice(0, 4000)}`
+    `## ${p.title} [${p.file}]\n${p.content.slice(0, QUERY_PAGE_CHARS)}`
   ).join('\n\n---\n\n')
 
   res.setHeader('Content-Type', 'text/event-stream')
@@ -857,7 +1170,7 @@ ${QUERY_LANG_INSTRUCTION}
 ${context}`
 
   try {
-    for await (const text of streamLLM(sysPrompt, question, 2048)) {
+    for await (const text of streamLLM(sysPrompt, question, QUERY_MAX_TOKENS)) {
       res.write(`data: ${JSON.stringify({ text })}\n\n`)
     }
     res.write('data: [DONE]\n\n')

@@ -12,12 +12,13 @@ npm start            # alias for node server.js
 
 No build step, no test suite. The entire application is a single `server.js` file served on the configured `PORT` (default `3000`).
 
-To set up a new knowledge base instance, create the directory structure and a mandatory `index.md`:
+To set up a new knowledge base instance, create the directory structure:
 
 ```bash
 mkdir -p /path/to/wiki/wiki /path/to/wiki/raw
-echo "# Index" > /path/to/wiki/wiki/index.md
 ```
+
+`index.md` is auto-created on first ingest if absent. You can also create it manually beforehand to pre-populate sections.
 
 Then configure `.env` (copy from `.env.example`) with `WIKI_PATH`, `RAW_PATH`, and an LLM API key.
 
@@ -30,12 +31,13 @@ This is a **single-file Node.js application** (`server.js`) — all routes, LLM 
 ```
 WIKI_ROOT/          # parent of RAW_PATH
 ├── wiki/           # WIKI_PATH — LLM-generated structured Markdown pages
-│   ├── index.md    # required; manually created; used by ingest for cross-linking context
+│   ├── index.md    # auto-created on first ingest if absent; used as cross-linking context
 │   ├── concepts/   # auto-created by ingest
 │   ├── entities/
 │   └── sources/
 ├── raw/            # RAW_PATH — original user-uploaded files
 │   └── ingest/     # default drop zone for /api/upload
+├── conversations.json  # Redis fallback for conversation history
 └── log.md          # append-only ingest log
 ```
 
@@ -57,10 +59,43 @@ WIKI_ROOT/          # parent of RAW_PATH
 - **Ingest deduplication**: `getProcessedIngestFiles` scans wiki frontmatter `sources:` fields; `getPendingIngestFiles` returns only unprocessed raw files, with prefix-match fallback for truncated filenames.
 - **Lint/fix**: `/api/lint` checks broken wikilinks, missing frontmatter fields, orphan components, and empty ghost files. `/api/lint/fix` patches broken links via aliases and bridges isolated clusters with `See Also` links.
 - **Multipart upload encoding**: filenames from browser uploads need `Buffer.from(name, 'latin1').toString('utf8')` to handle non-ASCII characters correctly.
+- **`safeMatter`**: thin wrapper around `gray-matter` that never throws — LLM-generated files with special characters in frontmatter produce invalid YAML. All frontmatter reads must go through `safeMatter`, not `matter` directly.
+- **`fixSourcesField`**: called after every LLM file write to re-serialize the `sources:` field as single-quoted YAML, preventing future parse errors from filenames with quotes or colons.
+- **LLM response format**: ingest uses `===FILE:path/to/page.md===` and `===INDEX:SectionName===` delimiters (not JSON) to parse multiple output files from a single LLM call.
+
+### Query tuning
+
+Four env vars control retrieval and answer quality:
+
+- `QUERY_TOP_K` (default `10`): number of pages passed to the LLM as context.
+- `QUERY_PAGE_CHARS` (default `8000`): characters taken from each page. Longer pages are truncated.
+- `QUERY_MIN_SCORE` (default `0`): minimum relevance score to include a page. Raise to filter weakly-related pages (try `5`–`20` for large knowledge bases).
+- `QUERY_MAX_TOKENS` (default `2048`): max tokens in the LLM answer. Raise for more detailed responses.
+
+### Language configuration
+
+Two env vars meaningfully change LLM behavior at runtime:
+
+- `INGEST_LANG` (`zh` | `en` | `auto`, default `zh`): language for generated wiki page content.
+- `QUERY_LANG` (`zh` | `en` | `bilingual`, default `zh`): language for query answers.
+
+### Redis and conversation history
+
+Conversation history uses **Redis** (optional) with transparent fallback to `conversations.json` in `WIKI_ROOT`. Redis is attempted at startup via `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD` env vars; connection errors are silently swallowed. `redisReady()` checks live connection status before every read/write. Keys: `wiki:conv:<id>` (list, 30-day TTL) and `wiki:conversations` (sorted set for listing). Conversation API: `GET/DELETE /api/conversation/:id`, `GET /api/conversations`, `POST /api/conversation/save`.
+
+### Scheduler
+
+Automatic ingest runs on a cron schedule (`INGEST_CRON`, default `*/30 * * * *`). `INGEST_ENABLED=false` disables it. `INGEST_EXCLUDE` is a comma-separated list of `raw/` subdirectories to skip. The scheduler can also be controlled at runtime via `POST /api/ingest/config` and `POST /api/ingest/run-now`.
 
 ### Frontend (`public/`)
 
 Static files served by Express. `graph.js` uses D3.js (v7) to render the force-directed graph. `marked.min.js` renders Markdown in the page detail panel.
+
+### Additional API endpoints
+
+- `GET /api/backlinks/:id` — returns pages that link to the given page ID.
+- `GET /api/raw/tree` — raw file tree grouped by subdirectory.
+- `GET /api/raw/file/*` — render a raw file as HTML.
 
 ### MCP integration
 

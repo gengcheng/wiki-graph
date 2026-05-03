@@ -28,6 +28,10 @@
         <span class="menu-icon">◫</span>
         <span class="menu-label">文件浏览</span>
       </button>
+      <button class="menu-item" data-view="tags">
+        <span class="menu-icon">#</span>
+        <span class="menu-label">标签</span>
+      </button>
       <button class="menu-item" data-view="ingest">
         <span class="menu-icon">↓</span>
         <span class="menu-label">摄入</span>
@@ -79,6 +83,14 @@
 
     <!-- View: Query -->
     <div id="view-query" class="view active">
+      <div id="query-page-panel">
+        <div id="qpp-header">
+          <span id="qpp-badge"></span>
+          <button id="qpp-close">✕</button>
+        </div>
+        <h2 id="qpp-title"></h2>
+        <div id="qpp-content"></div>
+      </div>
       <div id="query-topbar">
         <span id="query-topbar-title">智能问答</span>
         <button id="new-chat-btn">+ 新问答</button>
@@ -132,6 +144,31 @@
       </div>
     </div>
 
+    <!-- View: Tags -->
+    <div id="view-tags" class="view">
+      <div id="tags-sidebar">
+        <div id="tags-sidebar-search-wrap">
+          <input id="tags-sidebar-search" type="text" placeholder="搜索标签…" autocomplete="off">
+        </div>
+        <div id="tags-list"></div>
+      </div>
+      <div id="tags-main">
+        <div id="tags-welcome">
+          <div class="welcome-icon">#</div>
+          <p>选择左侧标签查看页面</p>
+        </div>
+        <div id="tags-pages" style="display:none"></div>
+      </div>
+      <div id="tags-page-panel">
+        <div id="tpp-header">
+          <span id="tpp-badge"></span>
+          <button id="tpp-close">✕</button>
+        </div>
+        <h2 id="tpp-title"></h2>
+        <div id="tpp-content"></div>
+      </div>
+    </div>
+
     <!-- View: Ingest -->
     <div id="view-ingest" class="view">
       <div id="ingest-container">
@@ -151,6 +188,13 @@
             <input type="file" id="file-input" accept=".md,.txt" multiple>
           </div>
           <div id="file-list"></div>
+          <div id="tags-row">
+            <div class="tags-label">附加标签 <span class="tags-hint">（可选）</span></div>
+            <div id="tags-chips-wrap">
+              <div id="tags-chips"></div>
+              <input type="text" id="tags-input" placeholder="输入标签，回车添加…" autocomplete="off">
+            </div>
+          </div>
           <button id="ingest-file-btn" disabled>上传文件</button>
           <div id="ingest-log-wrap" style="display:none">
             <div id="ingest-log-header">
@@ -185,6 +229,17 @@
             <p>检查断链、Frontmatter、孤岛页面和 Ghost 文件</p>
           </div>
           <button id="lint-btn">开始检查</button>
+        </div>
+        <div id="lint-sched-card">
+          <div class="lint-sched-hd">
+            <span>定时检查</span>
+            <label class="sched-toggle"><input type="checkbox" id="lint-sched-enabled"><span class="sched-toggle-track"></span></label>
+          </div>
+          <div id="lint-sched-info"></div>
+          <div class="lint-sched-row">
+            <input id="lint-cron-input" type="text" placeholder="Cron 表达式，如 0 * * * *" autocomplete="off">
+            <button id="lint-cron-save">保存</button>
+          </div>
         </div>
         <div id="lint-stats" style="display:none">
           <div class="stat-card error">
