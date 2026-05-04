@@ -9,6 +9,6 @@ COPY server.js ./
 COPY public/ ./public/
 COPY skill/ ./skill/
 
-EXPOSE 3000
+EXPOSE 9090
 
 CMD ["node", "server.js"]

@@ -43,6 +43,10 @@
     </div>
     <div id="menu-footer">
       <div id="kb-stats"></div>
+      <button id="logout-btn" onclick="logout()" style="display:none">
+        <span class="menu-icon">⎋</span>
+        <span class="menu-label">退出登录</span>
+      </button>
     </div>
   </nav>
 
@@ -125,6 +129,14 @@
 
     <!-- View: Files -->
     <div id="view-files" class="view">
+      <div id="file-page-panel">
+        <div id="fpp-header">
+          <span id="fpp-badge"></span>
+          <button id="fpp-close">✕</button>
+        </div>
+        <h2 id="fpp-title"></h2>
+        <div id="fpp-content"></div>
+      </div>
       <div id="files-sidebar">
         <div id="files-search-wrap">
           <input id="files-search" type="text" placeholder="搜索文件…" autocomplete="off">
@@ -262,5 +274,14 @@
   </main>
 
   <script src="graph.js"></script>
+  <script>
+    async function logout() {
+      await fetch('/api/logout', { method: 'POST' })
+      location.href = '/login'
+    }
+    fetch('/api/auth/status').then(r => r.json()).then(d => {
+      if (d.authEnabled) document.getElementById('logout-btn').style.display = 'flex'
+    }).catch(() => {})
+  </script>
 </body>
 </html>

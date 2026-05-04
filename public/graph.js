@@ -96,6 +96,13 @@ function setupGraph() {
     document.getElementById('node-panel').classList.remove('open')
   })
 
+  document.getElementById('view-graph').addEventListener('click', e => {
+    const panel = document.getElementById('node-panel')
+    if (panel.classList.contains('open') && !panel.contains(e.target)) {
+      panel.classList.remove('open')
+    }
+  })
+
   if (document.getElementById('view-graph').classList.contains('active')) redrawGraph()
 }
 
@@ -270,12 +277,14 @@ async function openPageInPanel(pageId) {
   document.querySelectorAll('#node-content a[href^="wiki:"]').forEach(a => {
     a.addEventListener('click', e => {
       e.preventDefault()
+      e.stopPropagation()
       openPageInPanel(a.getAttribute('href').slice(5))
     })
   })
 }
 
 async function onNodeClick(event, d) {
+  event.stopPropagation()
   openPageInPanel(d.file.replace('.md', ''))
 }
 
@@ -609,8 +618,41 @@ async function doQuery() {
 
 // ── Files View ───────────────────────────────────────────────────────────────
 
+async function openFilesPagePanel(pageId) {
+  const panel = document.getElementById('file-page-panel')
+  panel.classList.add('open')
+  document.getElementById('fpp-badge').textContent = ''
+  document.getElementById('fpp-title').textContent = pageId.split('/').pop()
+  document.getElementById('fpp-content').innerHTML = '<span class="cursor"></span>'
+  try {
+    const data = await fetch(`/api/page/${encodeURIComponent(pageId)}`).then(r => r.json())
+    const nodeType = data.meta?.type || 'unknown'
+    const b = BADGE[nodeType] || BADGE.unknown
+    const badge = document.getElementById('fpp-badge')
+    badge.textContent = nodeType
+    badge.style.background = b.bg
+    badge.style.color = b.color
+    document.getElementById('fpp-title').textContent = data.meta?.title || pageId.split('/').pop()
+    document.getElementById('fpp-content').innerHTML = data.html
+    document.querySelectorAll('#fpp-content a[href^="wiki:"]').forEach(a => {
+      a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openFilesPagePanel(a.getAttribute('href').slice(5)) })
+    })
+  } catch {}
+}
+
 async function setupFiles() {
   const tree = document.getElementById('files-tree')
+
+  document.getElementById('fpp-close').addEventListener('click', () => {
+    document.getElementById('file-page-panel').classList.remove('open')
+  })
+
+  document.getElementById('files-content').addEventListener('click', e => {
+    const panel = document.getElementById('file-page-panel')
+    if (panel.classList.contains('open') && !panel.contains(e.target)) {
+      panel.classList.remove('open')
+    }
+  })
 
   // ── Wiki pages section ──────────────────────────────
   const wikiSection = document.createElement('div')
@@ -761,6 +803,10 @@ async function loadFile(node, btn) {
   }
 
   document.getElementById('file-body').innerHTML = html
+
+  document.querySelectorAll('#file-body a[href^="wiki:"]').forEach(a => {
+    a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openFilesPagePanel(a.getAttribute('href').slice(5)) })
+  })
 
   document.querySelectorAll('.bl-item').forEach(el => {
     el.addEventListener('click', () => {

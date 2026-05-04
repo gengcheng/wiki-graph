@@ -1,4 +1,4 @@
-try { require('fs').readFileSync('.env','utf8').split('\n').forEach(l => { const [k,v] = l.split('='); if(k&&v) process.env[k.trim()]=v.trim() }) } catch {}
+try { require('fs').readFileSync('.env','utf8').split('\n').forEach(l => { const m = l.match(/^\s*([^#\s][^=]*?)\s*=\s*(.*?)\s*$/); if (!m) return; const k = m[1], v = m[2].replace(/^(['"])(.*)\1$/, '$2'); if (k && !process.env[k]) process.env[k] = v }) } catch {}
 const express = require('express')
 const fs = require('fs')
 const path = require('path')
@@ -14,6 +14,7 @@ const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js')
 const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js')
 const { z } = require('zod')
 const Redis = require('ioredis')
+const crypto = require('crypto')
 
 let redis = null
 try {
@@ -45,7 +46,69 @@ const QUERY_LANG_INSTRUCTION = {
   bilingual: '用中英双语回答：先给出中文回答，再附上对应的英文翻译，两部分用 "---" 分隔。'
 }[QUERY_LANG] || '回答用中文，结构清晰。'
 
+// ── Auth ─────────────────────────────────────────────────────────────────────
+const AUTH_USERNAME = process.env.AUTH_USERNAME || ''
+const AUTH_PASSWORD = process.env.AUTH_PASSWORD || ''
+const authEnabled = !!(AUTH_USERNAME && AUTH_PASSWORD)
+const sessions = new Set()
+
+function parseCookies(req) {
+  const out = {}
+  const header = req.headers.cookie || ''
+  header.split(';').forEach(pair => {
+    const idx = pair.indexOf('=')
+    if (idx < 0) return
+    out[pair.slice(0, idx).trim()] = decodeURIComponent(pair.slice(idx + 1).trim())
+  })
+  return out
+}
+
+const SKILL_PATHS = new Set(['/api/query/sync', '/api/graph'])
+
+function requireAuth(req, res, next) {
+  if (!authEnabled) return next()
+  if (req.path === '/login' || req.path === '/login.html' || req.path === '/api/login') return next()
+  if (req.path.startsWith('/mcp/') || req.path.startsWith('/api/page/')) return next()
+  if (SKILL_PATHS.has(req.path)) return next()
+  const token = parseCookies(req).wiki_session
+  if (token && sessions.has(token)) return next()
+  if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' })
+  return res.redirect('/login')
+}
+
+app.use(requireAuth)
 app.use(express.static('public'))
+
+app.get('/login', (req, res) => {
+  if (authEnabled) {
+    const token = parseCookies(req).wiki_session
+    if (token && sessions.has(token)) return res.redirect('/')
+  }
+  res.sendFile(path.join(__dirname, 'public', 'login.html'))
+})
+
+app.post('/api/login', express.json(), (req, res) => {
+  if (!authEnabled) return res.json({ ok: true })
+  const { username, password } = req.body || {}
+  if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
+    const token = crypto.randomBytes(32).toString('hex')
+    sessions.add(token)
+    res.cookie('wiki_session', token, { httpOnly: true, sameSite: 'strict', maxAge: 7 * 24 * 60 * 60 * 1000 })
+    return res.json({ ok: true })
+  }
+  res.status(401).json({ error: '用户名或密码错误' })
+})
+
+app.post('/api/logout', (req, res) => {
+  const token = parseCookies(req).wiki_session
+  if (token) sessions.delete(token)
+  res.clearCookie('wiki_session')
+  res.json({ ok: true })
+})
+
+app.get('/api/auth/status', (req, res) => {
+  res.json({ authEnabled })
+})
 
 // gray-matter wrapper that never throws — filenames with quotes produce invalid YAML frontmatter
 function safeMatter(raw) {
