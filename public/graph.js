@@ -11,11 +11,28 @@ const NODE_COLOR = {
 const NODE_R = { entity: 9, concept: 8, topic: 8, source: 6, unknown: 6 }
 
 const BADGE = {
-  entity:  { bg: '#1e3a5f', color: '#4e9af1' },
-  concept: { bg: '#3d2e10', color: '#f1a84e' },
-  topic:   { bg: '#0e3320', color: '#4ef1a0' },
-  source:  { bg: '#2e1a4a', color: '#c084fc' },
-  unknown: { bg: '#1a1d27', color: '#94a3b8' }
+  dark: {
+    entity:  { bg: '#1e3a5f', color: '#4e9af1' },
+    concept: { bg: '#3d2e10', color: '#f1a84e' },
+    topic:   { bg: '#0e3320', color: '#4ef1a0' },
+    source:  { bg: '#2e1a4a', color: '#c084fc' },
+    unknown: { bg: '#252220', color: '#78726c' },
+    raw:     { bg: '#1e2535', color: '#64748b' }
+  },
+  light: {
+    entity:  { bg: 'rgba(79,126,241,0.1)',   color: '#3b6fda' },
+    concept: { bg: 'rgba(232,146,74,0.1)',   color: '#bf6010' },
+    topic:   { bg: 'rgba(78,181,138,0.1)',   color: '#1e8a5a' },
+    source:  { bg: 'rgba(168,128,232,0.1)',  color: '#7048c8' },
+    unknown: { bg: 'rgba(0,0,0,0.05)',       color: '#87817b' },
+    raw:     { bg: 'rgba(0,0,0,0.06)',       color: '#87817b' }
+  }
+}
+
+function getBadge(type) {
+  const theme = document.documentElement.getAttribute('data-theme') || 'light'
+  const map = BADGE[theme] || BADGE.dark
+  return map[type] || map.unknown
 }
 
 const GROUP_LABEL = { entity: '实体', concept: '概念', topic: '主题', source: '源', unknown: '其他' }
@@ -262,7 +279,7 @@ async function openPageInPanel(pageId) {
 
   const node = allNodes.find(n => n.id === pageId)
   const nodeType = node?.type || 'unknown'
-  const b = BADGE[nodeType] || BADGE.unknown
+  const b = getBadge(nodeType)
   const badge = document.getElementById('node-type-badge')
   badge.textContent = nodeType
   badge.style.background = b.bg
@@ -499,7 +516,7 @@ async function openQueryPagePanel(pageId) {
   try {
     const data = await fetch(`/api/page/${encodeURIComponent(pageId)}`).then(r => r.json())
     const nodeType = data.meta?.type || 'unknown'
-    const b = BADGE[nodeType] || BADGE.unknown
+    const b = getBadge(nodeType)
     const badge = document.getElementById('qpp-badge')
     badge.textContent = nodeType
     badge.style.background = b.bg
@@ -627,7 +644,7 @@ async function openFilesPagePanel(pageId) {
   try {
     const data = await fetch(`/api/page/${encodeURIComponent(pageId)}`).then(r => r.json())
     const nodeType = data.meta?.type || 'unknown'
-    const b = BADGE[nodeType] || BADGE.unknown
+    const b = getBadge(nodeType)
     const badge = document.getElementById('fpp-badge')
     badge.textContent = nodeType
     badge.style.background = b.bg
@@ -727,7 +744,7 @@ function makeGroup(headerHTML, items, collapsed = false) {
 
   const header = document.createElement('div')
   header.className = 'files-group-header'
-  header.innerHTML = `<span class="files-group-arrow">▾</span>${headerHTML} <span style="color:#4a5070;margin-left:auto">${items.length}</span>`
+  header.innerHTML = `<span class="files-group-arrow">▾</span>${headerHTML} <span style="color:var(--muted);margin-left:auto">${items.length}</span>`
   header.addEventListener('click', () => group.classList.toggle('collapsed'))
 
   const itemsEl = document.createElement('div')
@@ -757,15 +774,16 @@ async function loadRawFile(filePath, name, btn) {
   document.getElementById('file-header').style.display = 'flex'
 
   const badge = document.getElementById('file-type-badge')
+  const rawBadge = getBadge('raw')
   badge.textContent = 'raw'
-  badge.style.background = '#1e2535'
-  badge.style.color = '#64748b'
+  badge.style.background = rawBadge.bg
+  badge.style.color = rawBadge.color
 
   document.getElementById('file-title').textContent = name
   document.getElementById('file-body').innerHTML = '<span class="cursor"></span>'
 
   const data = await fetch(`/api/raw/file/${encodeURIComponent(filePath)}`).then(r => r.json())
-  document.getElementById('file-body').innerHTML = data.html || `<p style="color:#64748b">文件内容为空</p>`
+  document.getElementById('file-body').innerHTML = data.html || `<p style="color:var(--muted)">文件内容为空</p>`
 }
 
 async function loadFile(node, btn) {
@@ -775,7 +793,7 @@ async function loadFile(node, btn) {
   document.getElementById('files-welcome').style.display = 'none'
   document.getElementById('file-header').style.display = 'flex'
 
-  const b = BADGE[node.type] || BADGE.unknown
+  const b = getBadge(node.type)
   const badge = document.getElementById('file-type-badge')
   badge.textContent = node.type
   badge.style.background = b.bg
@@ -794,7 +812,7 @@ async function loadFile(node, btn) {
 
   if (blData.backlinks && blData.backlinks.length > 0) {
     const items = blData.backlinks.map(n => {
-      const badge = BADGE[n.type] || BADGE.unknown
+      const badge = getBadge(n.type)
       return `<span class="bl-item" data-id="${n.id}" data-type="${n.type}">`
         + `<span class="bl-dot" style="background:${badge.bg};color:${badge.color}">${n.type[0].toUpperCase()}</span>`
         + `${n.title}</span>`
@@ -829,7 +847,7 @@ async function openTagsPagePanel(pageId) {
   try {
     const data = await fetch(`/api/page/${encodeURIComponent(pageId)}`).then(r => r.json())
     const nodeType = data.meta?.type || 'unknown'
-    const b = BADGE[nodeType] || BADGE.unknown
+    const b = getBadge(nodeType)
     const badge = document.getElementById('tpp-badge')
     badge.textContent = nodeType
     badge.style.background = b.bg
@@ -957,7 +975,7 @@ async function setupTags() {
     pagesEl.innerHTML = `<div id="tags-pages-header">${tag} · ${pages.length} 个页面</div>`
 
     for (const node of pages.sort((a, b) => a.title.localeCompare(b.title))) {
-      const b = BADGE[node.type] || BADGE.unknown
+      const b = getBadge(node.type)
       const card = document.createElement('div')
       card.className = 'tag-page-card'
       const otherTags = (node.tags || []).filter(t => t !== tag).slice(0, 3)

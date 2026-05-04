@@ -37,9 +37,10 @@ const INGEST_MAX_TOKENS  = parseInt(process.env.INGEST_MAX_TOKENS  || '8192',  1
 const INGEST_INDEX_CHARS = parseInt(process.env.INGEST_INDEX_CHARS || '3000',  10)
 const QUERY_LANG        = process.env.QUERY_LANG         || 'zh'
 const QUERY_TOP_K       = parseInt(process.env.QUERY_TOP_K       || '10', 10)
-const QUERY_PAGE_CHARS  = parseInt(process.env.QUERY_PAGE_CHARS  || '8000', 10)
+const QUERY_CHUNK_SIZE  = parseInt(process.env.QUERY_CHUNK_SIZE  || '1500', 10)
 const QUERY_MIN_SCORE   = parseFloat(process.env.QUERY_MIN_SCORE || '0')
 const QUERY_MAX_TOKENS  = parseInt(process.env.QUERY_MAX_TOKENS  || '2048', 10)
+const QUERY_RERANK      = (process.env.QUERY_RERANK ?? 'true') === 'true'
 const QUERY_LANG_INSTRUCTION = {
   zh:        '回答用中文，结构清晰。',
   en:        'Answer in English, with clear structure.',
@@ -272,7 +273,7 @@ async function* streamLLM(system, userMsg, maxTokens = 4096) {
 }
 
 function buildGraph() {
-  const files = globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['index.md', 'overview.md'] })
+  const files = globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['index.md', 'overview.md', 'log.md'] })
   const nodes = []
   const edges = []
   const titleMap = buildTitleMap(files, WIKI_PATH)
@@ -318,7 +319,7 @@ function buildGraph() {
 app.get('/api/tags', (req, res) => {
   const counts = {}
   try {
-    for (const file of globSync('**/*.md', { cwd: WIKI_PATH })) {
+    for (const file of globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['log.md'] })) {
       const { data } = safeMatter(fs.readFileSync(path.join(WIKI_PATH, file), 'utf8'))
       const tags = Array.isArray(data.tags) ? data.tags : (data.tags ? [data.tags] : [])
       tags.forEach(t => { if (t) counts[String(t)] = (counts[String(t)] || 0) + 1 })
@@ -334,7 +335,7 @@ app.get('/api/tags', (req, res) => {
 
 function updateTagInFiles(oldTag, newTag) {
   const updated = []
-  for (const file of globSync('**/*.md', { cwd: WIKI_PATH })) {
+  for (const file of globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['log.md'] })) {
     const filePath = path.join(WIKI_PATH, file)
     const raw = fs.readFileSync(filePath, 'utf8')
     const parsed = safeMatter(raw)
@@ -387,7 +388,7 @@ app.get('/api/page/*', (req, res) => {
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Not found' })
   const raw = fs.readFileSync(filePath, 'utf8')
   const { data, content } = safeMatter(raw)
-  const files = globSync('**/*.md', { cwd: WIKI_PATH })
+  const files = globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['log.md'] })
   const titleMap = buildTitleMap(files, WIKI_PATH)
   const cleaned = content.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target, label) => {
     const text = (label || target).trim()
@@ -449,7 +450,7 @@ function normalizeQuotes(s) {
 function getExistingTags() {
   const tags = new Set()
   try {
-    for (const file of globSync('**/*.md', { cwd: WIKI_PATH })) {
+    for (const file of globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['log.md'] })) {
       const { data } = safeMatter(fs.readFileSync(path.join(WIKI_PATH, file), 'utf8'))
       const t = Array.isArray(data.tags) ? data.tags : (data.tags ? [data.tags] : [])
       t.forEach(tag => { if (tag) tags.add(String(tag)) })
@@ -461,7 +462,7 @@ function getExistingTags() {
 function getProcessedIngestFiles() {
   const processed = new Set()
   try {
-    const files = globSync('**/*.md', { cwd: WIKI_PATH })
+    const files = globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['log.md'] })
     for (const file of files) {
       const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
       const { data } = safeMatter(raw)
@@ -616,7 +617,7 @@ ${existingIndex}`
   }
 
   const logLine = `\n## [${today}] ingest | ${sourceName}\n- Raw: raw/${rawFileName}\n- Pages: ${created.join(', ')}\n`
-  fs.appendFileSync(path.join(WIKI_ROOT, 'log.md'), logLine)
+  fs.appendFileSync(path.join(WIKI_PATH, 'log.md'), logLine)
 
   return created.length
 }
@@ -633,7 +634,7 @@ async function runScheduledIngest() {
     if (schedulerState.log.length > 200) schedulerState.log.shift()
   }
 
-  const logPath = path.join(WIKI_ROOT, 'log.md')
+  const logPath = path.join(WIKI_PATH, 'log.md')
   const ts = new Date().toISOString().replace('T', ' ').slice(0, 16)
   fs.appendFileSync(logPath, `\n## [${ts}] scheduler | 发现 ${pending.length} 个待处理文件\n`)
 
@@ -718,7 +719,7 @@ async function runScheduledLint() {
   lintSchedulerState.running = true
   lintSchedulerState.lastRun = new Date().toISOString()
   try {
-    const files = globSync('**/*.md', { cwd: WIKI_PATH })
+    const files = globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['log.md'] })
     const titleMap = buildTitleMap(files, WIKI_PATH)
     const pageData = {}
     for (const file of files) {
@@ -844,7 +845,7 @@ app.get('/api/lint', (req, res) => {
 
   const send = (type, msg) => res.write(`data: ${JSON.stringify({ type, msg })}\n\n`)
 
-  const files = globSync('**/*.md', { cwd: WIKI_PATH })
+  const files = globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['log.md'] })
   send('log', `扫描 ${files.length} 个页面`)
 
   // build maps
@@ -917,13 +918,13 @@ app.get('/api/lint', (req, res) => {
 
   // 4. ghost files
   send('section', '检查 Ghost 文件')
-  const wikiRoot = globSync('*.md', { cwd: WIKI_PATH }).filter(f => !['index.md','overview.md'].includes(f))
+  const wikiRoot = globSync('*.md', { cwd: WIKI_PATH, ignore: ['log.md'] }).filter(f => !['index.md','overview.md'].includes(f))
   for (const f of wikiRoot) {
     if (!fs.readFileSync(path.join(WIKI_PATH, f), 'utf8').trim()) {
       warnings++; send('warning', `Ghost 文件: wiki/${f}`)
     }
   }
-  const repoRoot = globSync('*.md', { cwd: WIKI_ROOT }).filter(f => f !== 'log.md')
+  const repoRoot = globSync('*.md', { cwd: WIKI_ROOT })
   for (const f of repoRoot) {
     if (!fs.readFileSync(path.join(WIKI_ROOT, f), 'utf8').trim()) {
       warnings++; send('warning', `Ghost 文件 (根目录): ${f}`)
@@ -978,7 +979,7 @@ app.get('/api/lint', (req, res) => {
 
 // shared helper: rebuild pageData + inbound map (mirrors lint logic)
 function buildPageData() {
-  const files = globSync('**/*.md', { cwd: WIKI_PATH })
+  const files = globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['log.md'] })
   const titleMap = buildTitleMap(files, WIKI_PATH)
   const pageData = {}
   for (const file of files) {
@@ -1169,30 +1170,116 @@ function scoreRelevance(question, pageText) {
   return score
 }
 
-async function queryWiki(question) {
-  const files = globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['index.md'] })
+const TEMPORAL_PATTERNS = /今天|今日|昨天|昨日|最近|这周|本周|这两天|这几天|today|yesterday|recent|this week/i
+
+// Split a page into semantic chunks scored independently.
+// Splits on markdown headings first; slides through sections that exceed QUERY_CHUNK_SIZE.
+function chunkPage(page) {
+  const { content, ...meta } = page
+  const sections = content.split(/(?=^#{1,3} )/m).map(s => s.trim()).filter(s => s.length > 50)
+  const raw = sections.length > 0 ? sections : [content]
+  const step = QUERY_CHUNK_SIZE - 150  // 150-char overlap between windows
+  const chunks = []
+  for (const section of raw) {
+    if (section.length <= QUERY_CHUNK_SIZE) {
+      chunks.push(section)
+    } else {
+      for (let i = 0; i < section.length; i += step) {
+        const chunk = section.slice(i, i + QUERY_CHUNK_SIZE).trim()
+        if (chunk.length > 80) chunks.push(chunk)
+      }
+    }
+  }
+  return chunks.map(chunk => ({ ...meta, chunk }))
+}
+
+async function rerankChunks(question, candidates) {
+  const list = candidates.map((c, i) => {
+    const preview = c.chunk.slice(0, 120).replace(/\n+/g, ' ')
+    return `[${i}] ${c.title} — ${preview}`
+  }).join('\n')
+  const system = `你是检索相关性评估助手。根据用户问题，从候选段落中选出最相关的，返回编号列表（逗号分隔），最多 ${QUERY_TOP_K} 个。只输出数字编号，不要任何解释。示例：0,3,5`
+  const user = `问题：${question}\n\n候选段落：\n${list}`
+  let raw = ''
+  try {
+    for await (const text of streamLLM(system, user, 64)) raw += text
+    const indices = [...new Set(raw.match(/\d+/g)?.map(Number) ?? [])]
+      .filter(i => i < candidates.length)
+      .slice(0, QUERY_TOP_K)
+    if (indices.length > 0) return indices.map(i => candidates[i])
+  } catch {}
+  return candidates.slice(0, QUERY_TOP_K)
+}
+
+async function buildQueryContext(question) {
+  const today = new Date().toISOString().split('T')[0]
+  const files = globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['index.md', 'log.md'] })
   const pages = files.map(file => {
     const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
     const { data, content } = safeMatter(raw)
     const tags = Array.isArray(data.tags) ? data.tags.join(' ') : (data.tags || '')
-    return { file, title: data.title != null ? String(data.title) : file, tags, content }
+    return {
+      file,
+      title: data.title != null ? String(data.title) : file,
+      tags,
+      content,
+      created: data.created ? String(data.created) : '',
+      updated: data.updated ? String(data.updated) : ''
+    }
   })
-  const scored = pages.map(p => ({
-    ...p,
-    score: scoreRelevance(question, p.title + ' ' + p.tags + ' ' + p.content)
+
+  // Score individual chunks instead of whole pages
+  const allChunks = pages.flatMap(chunkPage)
+  const scored = allChunks.map(c => ({
+    ...c,
+    score: scoreRelevance(question, c.title + ' ' + c.tags + ' ' + c.chunk)
   })).sort((a, b) => b.score - a.score)
-  const top = scored.slice(0, QUERY_TOP_K).filter(p => p.score > QUERY_MIN_SCORE)
-  const sources = top.map(p => p.file)
-  const context = top.map(p =>
-    `## ${p.title} [${p.file}]\n${p.content.slice(0, QUERY_PAGE_CHARS)}`
-  ).join('\n\n---\n\n')
-  const sysPrompt = `你是一个个人知识库助手。以下是知识库中与问题最相关的页面（按相关度排序）。
-请优先基于这些页面内容回答，尤其是页面中与问题直接相关的具体内容、观点和建议。
-如果某个页面包含直接相关内容，请明确引用它（如：根据《页面标题》…）。
+
+  // Reranking uses a wider candidate pool; without reranking take top K directly
+  const candidateK = QUERY_RERANK ? QUERY_TOP_K * 3 : QUERY_TOP_K
+  let top = scored.slice(0, candidateK).filter(c => c.score > QUERY_MIN_SCORE)
+
+  // For temporal queries, inject the first chunk of recently created pages into candidates
+  if (TEMPORAL_PATTERNS.test(question)) {
+    const recentPages = [...pages]
+      .filter(p => p.created)
+      .sort((a, b) => b.created.localeCompare(a.created))
+      .slice(0, Math.ceil(QUERY_TOP_K / 2))
+    const seenFiles = new Set(top.map(c => c.file))
+    for (const page of recentPages) {
+      if (!seenFiles.has(page.file)) {
+        const first = chunkPage(page)[0]
+        if (first) { top.push({ ...first, score: 0 }); seenFiles.add(page.file) }
+      }
+    }
+  }
+
+  // LLM reranking: semantically select the best K from the wider candidate pool
+  if (QUERY_RERANK && top.length > QUERY_TOP_K) {
+    top = await rerankChunks(question, top)
+  } else {
+    top = top.slice(0, QUERY_TOP_K)
+  }
+
+  const sources = [...new Set(top.map(c => c.file))]
+  const context = top.map(c => {
+    const dateLine = c.created ? ` (摄入日期: ${c.created})` : ''
+    return `## ${c.title} [${c.file}]${dateLine}\n${c.chunk}`
+  }).join('\n\n---\n\n')
+
+  const sysPrompt = `你是一个个人知识库助手。今天的日期是 ${today}。以下是知识库中与问题最相关的段落（按相关度排序，括号内为摄入日期）。
+请优先基于这些内容回答，尤其是与问题直接相关的具体内容、观点和建议。
+如果某段内容来自特定页面，请明确引用它（如：根据《页面标题》…）。
 若知识库中确实没有相关信息，再结合自身知识回答，但需注明"以下来自通用知识"。
 ${QUERY_LANG_INSTRUCTION}
 
 ${context}`
+
+  return { sources, sysPrompt }
+}
+
+async function queryWiki(question) {
+  const { sources, sysPrompt } = await buildQueryContext(question)
   let answer = ''
   for await (const text of streamLLM(sysPrompt, question, QUERY_MAX_TOKENS)) answer += text
   return { answer, sources }
@@ -1202,35 +1289,12 @@ app.post('/api/query', express.json(), async (req, res) => {
   const { question } = req.body
   if (!question) return res.status(400).json({ error: 'Missing question' })
 
-  const files = globSync('**/*.md', { cwd: WIKI_PATH, ignore: ['index.md'] })
-  const pages = files.map(file => {
-    const raw = fs.readFileSync(path.join(WIKI_PATH, file), 'utf8')
-    const { data, content } = safeMatter(raw)
-    const tags = Array.isArray(data.tags) ? data.tags.join(' ') : (data.tags || '')
-    return { file, title: data.title != null ? String(data.title) : file, tags, content }
-  })
-  const scored = pages.map(p => ({
-    ...p,
-    score: scoreRelevance(question, p.title + ' ' + p.tags + ' ' + p.content)
-  })).sort((a, b) => b.score - a.score)
-  const top = scored.slice(0, QUERY_TOP_K).filter(p => p.score > QUERY_MIN_SCORE)
-  const selected = top.map(p => p.file)
-  const context = top.map(p =>
-    `## ${p.title} [${p.file}]\n${p.content.slice(0, QUERY_PAGE_CHARS)}`
-  ).join('\n\n---\n\n')
+  const { sources, sysPrompt } = await buildQueryContext(question)
 
   res.setHeader('Content-Type', 'text/event-stream')
   res.setHeader('Cache-Control', 'no-cache')
   res.setHeader('Connection', 'keep-alive')
-  res.write(`data: ${JSON.stringify({ sources: selected })}\n\n`)
-
-  const sysPrompt = `你是一个个人知识库助手。以下是知识库中与问题最相关的页面（按相关度排序）。
-请优先基于这些页面内容回答，尤其是页面中与问题直接相关的具体内容、观点和建议。
-如果某个页面包含直接相关内容，请明确引用它（如：根据《页面标题》…）。
-若知识库中确实没有相关信息，再结合自身知识回答，但需注明"以下来自通用知识"。
-${QUERY_LANG_INSTRUCTION}
-
-${context}`
+  res.write(`data: ${JSON.stringify({ sources })}\n\n`)
 
   try {
     for await (const text of streamLLM(sysPrompt, question, QUERY_MAX_TOKENS)) {

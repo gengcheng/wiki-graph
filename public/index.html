@@ -3,6 +3,14 @@
 <head>
   <meta charset="utf-8">
   <title>Wiki</title>
+  <script>
+    /* Run before paint to prevent theme flash */
+    (function() {
+      const saved = localStorage.getItem('wiki-theme')
+      const preferred = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+      document.documentElement.setAttribute('data-theme', saved || preferred)
+    })()
+  </script>
   <script src="d3.v7.min.js"></script>
   <script src="marked.min.js"></script>
   <link rel="stylesheet" href="style.css">
@@ -43,6 +51,10 @@
     </div>
     <div id="menu-footer">
       <div id="kb-stats"></div>
+      <button id="theme-toggle" onclick="toggleTheme()">
+        <span id="theme-toggle-icon" class="menu-icon"></span>
+        <span id="theme-toggle-label"></span>
+      </button>
       <button id="logout-btn" onclick="logout()" style="display:none">
         <span class="menu-icon">⎋</span>
         <span class="menu-label">退出登录</span>
@@ -275,6 +287,36 @@
 
   <script src="graph.js"></script>
   <script>
+    // ── Theme ──────────────────────────────────────
+    function applyTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme)
+      const icon  = document.getElementById('theme-toggle-icon')
+      const label = document.getElementById('theme-toggle-label')
+      if (theme === 'dark') {
+        icon.textContent  = '○'
+        label.textContent = '浅色模式'
+      } else {
+        icon.textContent  = '●'
+        label.textContent = '深色模式'
+      }
+    }
+
+    function toggleTheme() {
+      const current = document.documentElement.getAttribute('data-theme') || 'light'
+      const next = current === 'dark' ? 'light' : 'dark'
+      document.documentElement.classList.add('theme-transitioning')
+      applyTheme(next)
+      localStorage.setItem('wiki-theme', next)
+      setTimeout(() => document.documentElement.classList.remove('theme-transitioning'), 260)
+    }
+
+    ;(function initTheme() {
+      const saved = localStorage.getItem('wiki-theme')
+      const preferred = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+      applyTheme(saved || preferred)
+    })()
+
+    // ── Auth ───────────────────────────────────────
     async function logout() {
       await fetch('/api/logout', { method: 'POST' })
       location.href = '/login'
