@@ -1,6 +1,7 @@
 # Wiki Graph
 
 个人知识库系统。将 Markdown 文件通过 LLM 自动转化为结构化 Wiki，并以知识图谱方式可视化。支持深色 / 浅色主题，智能问答采用语义分块检索 + LLM Reranking。
+<img width="1209" height="935" alt="Screenshot 2026-05-04 at 20 34 21" src="https://github.com/user-attachments/assets/8adf03b5-6262-4250-a77b-b0925ac20e8d" />
 
 ## 快速启动
 
